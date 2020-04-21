@@ -1,3 +1,7 @@
+{{ if eq .Kind "home" }}
+<p>This is the navbar for the home page</p>
+<p>Here is a link to the <a href="/docs">docs</a></p>
+{{ else }}
 {{ $cover := .HasShortcode "blocks/cover" }}
 <nav
 	class="js-navbar-scroll navbar navbar-expand navbar-light flex-column flex-md-row td-navbar {{ if $cover }}td-navbar-home{{ end }}">
@@ -38,3 +42,4 @@
 	</div>
 	<div class="navbar-nav d-none d-lg-block">{{ partial "search-input.html" . }}</div>
 </nav>
+{{ end }}
