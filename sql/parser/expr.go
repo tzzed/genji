@@ -78,7 +78,9 @@ func (p *Parser) ParseExpr() (e expr.Expr, lit string, err error) {
 }
 
 func (p *Parser) parseOperator() (func(lhs, rhs expr.Expr) expr.Expr, scanner.Token, error) {
+
 	op, _, _ := p.ScanIgnoreWhitespace()
+
 	if !op.IsOperator() && op != scanner.NOT {
 		p.Unscan()
 		return nil, 0, nil

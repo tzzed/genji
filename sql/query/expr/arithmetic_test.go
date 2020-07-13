@@ -37,6 +37,7 @@ func TestArithmeticExpr(t *testing.T) {
 		{"1 ^ a", document.NewIntValue(0), false},
 		{"1 ^ NULL", nullLitteral, false},
 		{"1 ^ notFound", nullLitteral, false},
+
 	}
 
 	for _, test := range tests {

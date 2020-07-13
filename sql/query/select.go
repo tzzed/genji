@@ -71,6 +71,7 @@ func (stmt SelectStmt) exec(tx *database.Transaction, args []expr.Param) (Result
 	}
 
 	if stmt.OffsetExpr != nil {
+
 		v, err := stmt.OffsetExpr.Eval(stack)
 		if err != nil {
 			return res, err

@@ -388,6 +388,7 @@ func (v Value) ConvertToBool() (bool, error) {
 // ConvertToInt64 turns any number into an int64.
 // It doesn't work with other types.
 func (v Value) ConvertToInt64() (int64, error) {
+
 	if v.Type == Int64Value {
 		return v.V.(int64), nil
 	}
@@ -646,12 +647,12 @@ func calculateIntegers(a, b Value, operator byte) (res Value, err error) {
 
 	xa, err = a.ConvertToInt64()
 	if err != nil {
-		return
+		return NewNullValue(), nil
 	}
 
 	xb, err = b.ConvertToInt64()
 	if err != nil {
-		return
+		return NewNullValue(), nil
 	}
 
 	var xr int64

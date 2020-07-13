@@ -14,7 +14,6 @@ func (p *Parser) parseSelectStatement() (query.SelectStmt, error) {
 
 	// Parse field list or query.Wildcard
 	stmt.Selectors, err = p.parseResultFields()
-
 	if err != nil {
 		return stmt, err
 	}
