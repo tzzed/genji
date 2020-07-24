@@ -44,7 +44,7 @@ type EvalStack struct {
 	Tx       *database.Transaction
 	Document document.Document
 	Params   []Param
-	Cfg      *database.TableConfig
+	Info     *database.TableInfo
 }
 
 type simpleOperator struct {
@@ -118,4 +118,17 @@ type Operator interface {
 	SetLeftHandExpr(Expr)
 	SetRightHandExpr(Expr)
 	Token() scanner.Token
+}
+
+// Parentheses is a special expression which turns
+// any sub-expression as unary.
+// It hides the underlying operator, if any, from the parser
+// so that it doesn't get reordered by precedence.
+type Parentheses struct {
+	E Expr
+}
+
+// Eval calls the underlying expression Eval method.
+func (p Parentheses) Eval(es EvalStack) (document.Value, error) {
+	return p.E.Eval(es)
 }

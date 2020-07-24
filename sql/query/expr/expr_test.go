@@ -26,15 +26,15 @@ var stackWithDoc = expr.EvalStack{
 	Document: doc,
 }
 
-var fakeTableConfig = &database.TableConfig{
+var fakeTableInfo = &database.TableInfo{
 	FieldConstraints: []database.FieldConstraint{
 		{Path: []string{"c", "0"}, IsPrimaryKey: true},
 		{Path: []string{"c", "1"}},
 	},
 }
-var stackWithDocAndConfig = expr.EvalStack{
+var stackWithDocAndInfo = expr.EvalStack{
 	Document: doc,
-	Cfg:      fakeTableConfig,
+	Info:     fakeTableInfo,
 }
 
 var nullLitteral = document.NewNullValue()
@@ -61,7 +61,7 @@ func TestString(t *testing.T) {
 		`[1, 2, "foo"]`,
 		`{"a": "foo", "b": 10}`,
 		"pk()",
-		"CAST(10 AS int64)",
+		"CAST(10 AS integer)",
 	}
 
 	var operators = []string{

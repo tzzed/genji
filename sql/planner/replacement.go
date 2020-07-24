@@ -6,7 +6,7 @@ import (
 
 	"github.com/genjidb/genji/database"
 	"github.com/genjidb/genji/document"
-	"github.com/genjidb/genji/document/encoding"
+	"github.com/genjidb/genji/document/encoding/msgpack"
 	"github.com/genjidb/genji/engine"
 	"github.com/genjidb/genji/sql/query"
 	"github.com/genjidb/genji/sql/query/expr"
@@ -66,7 +66,7 @@ func (n *replacementNode) toResult(st document.Stream) (res query.Result, err er
 			}
 
 			docs[i].Reset()
-			err := docs[i].ScanDocument(d)
+			err := docs[i].Copy(d)
 			if err != nil {
 				return err
 			}
@@ -134,7 +134,7 @@ func (u *resumableIterator) Iterate(fn func(d document.Document) error) error {
 }
 
 type encodedDocumentWithKey struct {
-	encoding.EncodedDocument
+	msgpack.EncodedDocument
 
 	key []byte
 }

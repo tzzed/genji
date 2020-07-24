@@ -9,6 +9,7 @@ import (
 	"github.com/genjidb/genji/database"
 	"github.com/genjidb/genji/document"
 	"github.com/genjidb/genji/document/encoding"
+	"github.com/genjidb/genji/document/encoding/msgpack"
 	"github.com/genjidb/genji/engine/memoryengine"
 	"github.com/stretchr/testify/require"
 )
@@ -105,7 +106,7 @@ func TestTableGetDocument(t *testing.T) {
 
 		// create two documents, one with an additional field
 		doc1 := newDocument()
-		vc := document.NewInt64Value(40)
+		vc := document.NewIntegerValue(40)
 		doc1.Add("fieldc", vc)
 		doc2 := newDocument()
 
@@ -151,7 +152,7 @@ func TestTableInsert(t *testing.T) {
 			tx, err := db.Begin(true)
 			require.NoError(t, err)
 
-			_ = tx.CreateTable("test", &database.TableConfig{})
+			_ = tx.CreateTable("test", &database.TableInfo{})
 
 			tb, err := tx.GetTable("test")
 			require.NoError(t, err)
@@ -197,7 +198,7 @@ func TestTableInsert(t *testing.T) {
 
 		manualInsert := func(id int64) {
 			docid := encoding.EncodeInt64(id)
-			v, err := encoding.EncodeDocument(newDocument())
+			v, err := msgpack.EncodeDocument(newDocument())
 			require.NoError(t, err)
 			err = tb.Store.Put(docid, v)
 			require.NoError(t, err)
@@ -229,9 +230,9 @@ func TestTableInsert(t *testing.T) {
 		tx, cleanup := newTestDB(t)
 		defer cleanup()
 
-		err := tx.CreateTable("test", &database.TableConfig{
+		err := tx.CreateTable("test", &database.TableInfo{
 			FieldConstraints: []database.FieldConstraint{
-				{Path: []string{"foo", "a", "1"}, Type: document.Int32Value, IsPrimaryKey: true},
+				{Path: []string{"foo", "a", "1"}, Type: document.IntegerValue, IsPrimaryKey: true},
 			},
 		})
 		require.NoError(t, err)
@@ -245,7 +246,7 @@ func TestTableInsert(t *testing.T) {
 		// insert
 		key, err := tb.Insert(doc)
 		require.NoError(t, err)
-		require.Equal(t, encoding.EncodeInt32(10), key)
+		require.Equal(t, encoding.EncodeInt64(10), key)
 
 		// make sure the document is fetchable using the returned key
 		_, err = tb.GetDocument(key)
@@ -260,10 +261,10 @@ func TestTableInsert(t *testing.T) {
 		tx, cleanup := newTestDB(t)
 		defer cleanup()
 
-		err := tx.CreateTable("test", &database.TableConfig{
+		err := tx.CreateTable("test", &database.TableInfo{
 			FieldConstraints: []database.FieldConstraint{
 				{Path: []string{"foo"}, Type: document.ArrayValue},
-				{Path: []string{"foo", "0"}, Type: document.Int32Value},
+				{Path: []string{"foo", "0"}, Type: document.IntegerValue},
 			},
 		})
 		require.NoError(t, err)
@@ -283,16 +284,16 @@ func TestTableInsert(t *testing.T) {
 
 		v, err := document.ValuePath([]string{"foo", "0"}).GetValue(d)
 		require.NoError(t, err)
-		require.Equal(t, document.NewInt32Value(100), v)
+		require.Equal(t, document.NewIntegerValue(100), v)
 	})
 
 	t.Run("Should fail if Pk not found in document or empty", func(t *testing.T) {
 		tx, cleanup := newTestDB(t)
 		defer cleanup()
 
-		err := tx.CreateTable("test", &database.TableConfig{
+		err := tx.CreateTable("test", &database.TableInfo{
 			FieldConstraints: []database.FieldConstraint{
-				{Path: []string{"foo"}, Type: document.Int32Value, IsPrimaryKey: true},
+				{Path: []string{"foo"}, Type: document.IntegerValue, IsPrimaryKey: true},
 			},
 		})
 		require.NoError(t, err)
@@ -335,7 +336,7 @@ func TestTableInsert(t *testing.T) {
 
 		// create one document with the foo field
 		doc1 := newDocument()
-		foo := document.NewFloat64Value(10)
+		foo := document.NewDoubleValue(10)
 		doc1.Add("foo", foo)
 
 		// create one document without the foo field
@@ -367,10 +368,10 @@ func TestTableInsert(t *testing.T) {
 		tx, cleanup := newTestDB(t)
 		defer cleanup()
 
-		err := tx.CreateTable("test", &database.TableConfig{
+		err := tx.CreateTable("test", &database.TableInfo{
 			FieldConstraints: []database.FieldConstraint{
-				{[]string{"foo"}, document.Int32Value, false, false},
-				{[]string{"bar"}, document.Int8Value, false, false},
+				{[]string{"foo"}, document.IntegerValue, false, false},
+				{[]string{"bar"}, document.IntegerValue, false, false},
 			},
 		})
 		require.NoError(t, err)
@@ -378,8 +379,8 @@ func TestTableInsert(t *testing.T) {
 		require.NoError(t, err)
 
 		doc := document.NewFieldBuffer().
-			Add("foo", document.NewIntValue(1)).
-			Add("bar", document.NewFloat64Value(10)).
+			Add("foo", document.NewIntegerValue(1)).
+			Add("bar", document.NewDoubleValue(10)).
 			Add("baz", document.NewTextValue("baaaaz"))
 
 		// insert
@@ -391,10 +392,10 @@ func TestTableInsert(t *testing.T) {
 		require.NoError(t, err)
 		v, err := d.GetByField("foo")
 		require.NoError(t, err)
-		require.Equal(t, document.NewInt32Value(1), v)
+		require.Equal(t, document.NewIntegerValue(1), v)
 		v, err = d.GetByField("bar")
 		require.NoError(t, err)
-		require.Equal(t, document.NewInt8Value(10), v)
+		require.Equal(t, document.NewIntegerValue(10), v)
 		v, err = d.GetByField("baz")
 		require.NoError(t, err)
 		require.Equal(t, document.NewTextValue("baaaaz"), v)
@@ -405,7 +406,7 @@ func TestTableInsert(t *testing.T) {
 		defer cleanup()
 
 		// no enforced type, not null
-		err := tx.CreateTable("test1", &database.TableConfig{
+		err := tx.CreateTable("test1", &database.TableInfo{
 			FieldConstraints: []database.FieldConstraint{
 				{[]string{"foo"}, 0, false, true},
 			},
@@ -415,9 +416,9 @@ func TestTableInsert(t *testing.T) {
 		require.NoError(t, err)
 
 		// enforced type, not null
-		err = tx.CreateTable("test2", &database.TableConfig{
+		err = tx.CreateTable("test2", &database.TableInfo{
 			FieldConstraints: []database.FieldConstraint{
-				{[]string{"foo"}, document.Int32Value, false, true},
+				{[]string{"foo"}, document.IntegerValue, false, true},
 			},
 		})
 		require.NoError(t, err)
@@ -426,7 +427,7 @@ func TestTableInsert(t *testing.T) {
 
 		// insert with empty foo field should fail
 		_, err = tb1.Insert(document.NewFieldBuffer().
-			Add("bar", document.NewFloat64Value(1)))
+			Add("bar", document.NewDoubleValue(1)))
 		require.Error(t, err)
 
 		// insert with null foo field should fail
@@ -436,12 +437,12 @@ func TestTableInsert(t *testing.T) {
 
 		// otherwise it should work
 		_, err = tb1.Insert(document.NewFieldBuffer().
-			Add("foo", document.NewFloat64Value(1)))
+			Add("foo", document.NewDoubleValue(1)))
 		require.NoError(t, err)
 
 		// insert with empty foo field should fail
 		_, err = tb2.Insert(document.NewFieldBuffer().
-			Add("bar", document.NewFloat64Value(1)))
+			Add("bar", document.NewDoubleValue(1)))
 		require.Error(t, err)
 
 		// insert with null foo field should fail
@@ -451,7 +452,7 @@ func TestTableInsert(t *testing.T) {
 
 		// otherwise it should work
 		_, err = tb2.Insert(document.NewFieldBuffer().
-			Add("foo", document.NewFloat64Value(1)))
+			Add("foo", document.NewDoubleValue(1)))
 		require.NoError(t, err)
 	})
 
@@ -459,7 +460,7 @@ func TestTableInsert(t *testing.T) {
 		tx, cleanup := newTestDB(t)
 		defer cleanup()
 
-		err := tx.CreateTable("test1", &database.TableConfig{
+		err := tx.CreateTable("test1", &database.TableInfo{
 			FieldConstraints: []database.FieldConstraint{
 				{[]string{"foo", "1"}, 0, false, true},
 			},
@@ -470,11 +471,11 @@ func TestTableInsert(t *testing.T) {
 
 		// insert table with only one value
 		_, err = tb.Insert(document.NewFieldBuffer().
-			Add("foo", document.NewArrayValue(document.NewValueBuffer().Append(document.NewIntValue(1)))))
+			Add("foo", document.NewArrayValue(document.NewValueBuffer().Append(document.NewIntegerValue(1)))))
 		require.Error(t, err)
 		_, err = tb.Insert(document.NewFieldBuffer().
 			Add("foo", document.NewArrayValue(document.NewValueBuffer().
-				Append(document.NewIntValue(1)).Append(document.NewIntValue(2)))))
+				Append(document.NewIntegerValue(1)).Append(document.NewIntegerValue(2)))))
 		require.NoError(t, err)
 	})
 }
@@ -495,7 +496,7 @@ func TestTableDelete(t *testing.T) {
 
 		// create two documents, one with an additional field
 		doc1 := newDocument()
-		doc1.Add("fieldc", document.NewInt64Value(40))
+		doc1.Add("fieldc", document.NewIntegerValue(40))
 		doc2 := newDocument()
 
 		key1, err := tb.Insert(doc1)
@@ -666,7 +667,7 @@ func BenchmarkTableInsert(b *testing.B) {
 			var fb document.FieldBuffer
 
 			for i := int64(0); i < 10; i++ {
-				fb.Add(fmt.Sprintf("name-%d", i), document.NewInt64Value(i))
+				fb.Add(fmt.Sprintf("name-%d", i), document.NewIntegerValue(i))
 			}
 
 			b.ResetTimer()
@@ -695,7 +696,7 @@ func BenchmarkTableScan(b *testing.B) {
 			var fb document.FieldBuffer
 
 			for i := int64(0); i < 10; i++ {
-				fb.Add(fmt.Sprintf("name-%d", i), document.NewInt64Value(i))
+				fb.Add(fmt.Sprintf("name-%d", i), document.NewIntegerValue(i))
 			}
 
 			for i := 0; i < size; i++ {

@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/genjidb/genji/document"
-	"github.com/genjidb/genji/document/encoding"
+	"github.com/genjidb/genji/document/encoding/msgpack"
 	"github.com/genjidb/genji/engine"
 	"github.com/genjidb/genji/index"
 )
@@ -66,16 +66,16 @@ func (tx *Transaction) Promote() error {
 
 // CreateTable creates a table with the given name.
 // If it already exists, returns ErrTableAlreadyExists.
-func (tx Transaction) CreateTable(name string, cfg *TableConfig) error {
-	if cfg == nil {
-		cfg = new(TableConfig)
+func (tx Transaction) CreateTable(name string, info *TableInfo) error {
+	if info == nil {
+		info = new(TableInfo)
 	}
-	ti, err := tx.tableInfoStore.Insert(name, *cfg)
+	sid, err := tx.tableInfoStore.Insert(name, info)
 	if err != nil {
 		return err
 	}
 
-	err = tx.Tx.CreateStore(ti.storeID[:])
+	err = tx.Tx.CreateStore(sid)
 	if err != nil {
 		return fmt.Errorf("failed to create table %q: %w", name, err)
 	}
@@ -107,7 +107,7 @@ func (tx Transaction) GetTable(name string) (*Table, error) {
 func (tx Transaction) DropTable(name string) error {
 	it := tx.indexStore.st.NewIterator(engine.IteratorConfig{})
 
-	var buf encoding.EncodedDocument
+	var buf msgpack.EncodedDocument
 	var err error
 	for it.Seek(nil); it.Valid(); it.Next() {
 		item := it.Item()
