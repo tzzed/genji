@@ -86,7 +86,6 @@ func TestFieldBuffer(t *testing.T) {
 		err = buf.Copy(d)
 		require.NoError(t, err)
 
-
 		var fb document.FieldBuffer
 		d, err = document.NewFromJSON([]byte(`{"phone":{"type": "cell", "number":"111-222-333"}}`))
 		require.NoError(t, err)
@@ -99,10 +98,10 @@ func TestFieldBuffer(t *testing.T) {
 		vb = vb.Append(document.NewIntegerValue(0))
 
 		tests := []struct {
-			name     string
-			p        document.ValuePath
-			v 		document.Value
-			want    string
+			name string
+			p    document.ValuePath
+			v    document.Value
+			want string
 		}{
 			{"Set replace field textValue",
 				document.NewValuePath("friends.0.name"),
@@ -141,7 +140,6 @@ func TestFieldBuffer(t *testing.T) {
 				document.NewTextValue("foo@example.com"),
 				`{"friends": [{"name": "Baz", "address": {"city": "Paris", "zipcode": "75001"}, "a": [[1, 0, 0], 99, 0]}], "contact": {"phone": {"type": "fix", "number": "111-222-333"}, "email": "foo@example.com"}}`,
 			},
-
 		}
 
 		for _, test := range tests {
