@@ -6,7 +6,7 @@ import (
 	"github.com/genjidb/genji/database"
 	"github.com/genjidb/genji/document"
 	"github.com/genjidb/genji/engine/memoryengine"
-	"github.com/genjidb/genji/index"
+	"github.com/genjidb/genji/key"
 	"github.com/stretchr/testify/require"
 )
 
@@ -26,7 +26,7 @@ func newTestDB(t testing.TB) (*database.Transaction, func()) {
 // - CreateTable
 // - GetTable
 // - DropTable
-// - ListTables
+// - RenameTable
 func TestTxTable(t *testing.T) {
 	t.Run("Create", func(t *testing.T) {
 		tx, cleanup := newTestDB(t)
@@ -38,6 +38,31 @@ func TestTxTable(t *testing.T) {
 		// Creating a table that already exists should fail.
 		err = tx.CreateTable("test", nil)
 		require.EqualError(t, err, database.ErrTableAlreadyExists.Error())
+
+		// Creating a table that starts with __genji_ should fail.
+		err = tx.CreateTable("__genji_foo", nil)
+		require.Error(t, err)
+	})
+
+	t.Run("Create and rollback", func(t *testing.T) {
+		db, err := database.New(memoryengine.NewEngine())
+		require.NoError(t, err)
+		defer db.Close()
+
+		check := func() {
+			tx, err := db.Begin(true)
+			require.NoError(t, err)
+			defer func() {
+				err = tx.Rollback()
+				require.NoError(t, err)
+			}()
+
+			err = tx.CreateTable("test", nil)
+			require.NoError(t, err)
+		}
+
+		check()
+		check()
 	})
 
 	t.Run("Get", func(t *testing.T) {
@@ -75,29 +100,50 @@ func TestTxTable(t *testing.T) {
 		require.EqualError(t, err, database.ErrTableNotFound.Error())
 	})
 
-	t.Run("List", func(t *testing.T) {
+	t.Run("Rename", func(t *testing.T) {
 		tx, cleanup := newTestDB(t)
 		defer cleanup()
 
-		tables, err := tx.ListTables()
-		require.NoError(t, err)
-		require.Len(t, tables, 0)
-
-		err = tx.CreateTable("foo", nil)
-		require.NoError(t, err)
-
-		err = tx.CreateTable("bar", nil)
-		require.NoError(t, err)
-
-		err = tx.CreateTable("baz", nil)
+		ti := &database.TableInfo{FieldConstraints: []database.FieldConstraint{
+			{Path: []string{"name"}, Type: document.TextValue, IsNotNull: true},
+			{Path: []string{"age"}, Type: document.IntegerValue, IsPrimaryKey: true},
+			{Path: []string{"gender"}, Type: document.TextValue},
+			{Path: []string{"city"}, Type: document.TextValue},
+		}}
+		err := tx.CreateTable("foo", ti)
 		require.NoError(t, err)
 
-		tables, err = tx.ListTables()
+		err = tx.CreateIndex(database.IndexConfig{Path: []string{"gender"}, IndexName: "idx_gender", TableName: "foo"})
+		require.NoError(t, err)
+		err = tx.CreateIndex(database.IndexConfig{Path: []string{"city"}, IndexName: "idx_city", TableName: "foo", Unique: true})
 		require.NoError(t, err)
 
-		// The returned slice should be lexicographically ordered.
-		exp := []string{"bar", "baz", "foo"}
-		require.Equal(t, exp, tables)
+		err = tx.RenameTable("foo", "zoo")
+		require.NoError(t, err)
+
+		// Getting the old table should return an error.
+		_, err = tx.GetTable("foo")
+		require.EqualError(t, database.ErrTableNotFound, err.Error())
+
+		tb, err := tx.GetTable("zoo")
+		require.NoError(t, err)
+
+		// The field constraints should be the same.
+		info, err := tb.Info()
+		require.NoError(t, err)
+		require.Equal(t, ti.FieldConstraints, info.FieldConstraints)
+
+		// Check that the indexes have been updated as well.
+		idxs, err := tx.ListIndexes()
+		require.NoError(t, err)
+		require.Len(t, idxs, 2)
+		for _, idx := range idxs {
+			require.Equal(t, "zoo", idx.TableName)
+		}
+
+		// Renaming a non existing table should return an error
+		err = tx.RenameTable("foo", "")
+		require.EqualError(t, database.ErrTableNotFound, err.Error())
 	})
 }
 
@@ -227,8 +273,9 @@ func TestTxReIndex(t *testing.T) {
 		require.NoError(t, err)
 
 		var i int
-		err = idx.AscendGreaterOrEqual(index.EmptyPivot(document.IntegerValue), func(val document.Value, key []byte) error {
-			require.Equal(t, document.NewDoubleValue(float64(i)), val)
+		err = idx.AscendGreaterOrEqual(document.Value{Type: document.IntegerValue}, func(v, k []byte, isEqual bool) error {
+			enc := key.AppendValue(nil, document.NewDoubleValue(float64(i)))
+			require.Equal(t, enc, v)
 			i++
 			return nil
 		})
@@ -239,7 +286,7 @@ func TestTxReIndex(t *testing.T) {
 		require.NoError(t, err)
 
 		i = 0
-		err = idx.AscendGreaterOrEqual(index.EmptyPivot(document.IntegerValue), func(val document.Value, key []byte) error {
+		err = idx.AscendGreaterOrEqual(document.Value{Type: document.IntegerValue}, func(val, key []byte, isEqual bool) error {
 			i++
 			return nil
 		})
@@ -304,8 +351,9 @@ func TestReIndexAll(t *testing.T) {
 		require.NoError(t, err)
 
 		var i int
-		err = idx.AscendGreaterOrEqual(index.EmptyPivot(document.IntegerValue), func(val document.Value, key []byte) error {
-			require.Equal(t, document.NewDoubleValue(float64(i)), val)
+		err = idx.AscendGreaterOrEqual(document.Value{Type: document.IntegerValue}, func(v, k []byte, isEqual bool) error {
+			enc := key.AppendValue(nil, document.NewDoubleValue(float64(i)))
+			require.Equal(t, enc, v)
 			i++
 			return nil
 		})
@@ -316,8 +364,9 @@ func TestReIndexAll(t *testing.T) {
 		require.NoError(t, err)
 
 		i = 0
-		err = idx.AscendGreaterOrEqual(index.EmptyPivot(document.IntegerValue), func(val document.Value, key []byte) error {
-			require.Equal(t, document.NewDoubleValue(float64(i)), val)
+		err = idx.AscendGreaterOrEqual(document.Value{Type: document.IntegerValue}, func(v, k []byte, isEqual bool) error {
+			enc := key.AppendValue(nil, document.NewDoubleValue(float64(i)))
+			require.Equal(t, enc, v)
 			i++
 			return nil
 		})

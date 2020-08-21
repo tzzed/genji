@@ -8,10 +8,10 @@ import (
 	"strconv"
 
 	"github.com/genjidb/genji/document"
-	"github.com/genjidb/genji/document/encoding"
 	"github.com/genjidb/genji/document/encoding/msgpack"
 	"github.com/genjidb/genji/engine"
 	"github.com/genjidb/genji/index"
+	"github.com/genjidb/genji/key"
 )
 
 // A Table represents a collection of documents.
@@ -24,12 +24,248 @@ type Table struct {
 
 // Info of the table.
 func (t *Table) Info() (*TableInfo, error) {
-	ti, err := t.infoStore.Get(t.name)
+	return t.infoStore.Get(t.tx, t.name)
+}
+
+// Name returns the name of the table.
+func (t *Table) Name() string {
+	return t.name
+}
+
+// Truncate deletes all the documents from the table.
+func (t *Table) Truncate() error {
+	return t.Store.Truncate()
+}
+
+// Insert the document into the table.
+// If a primary key has been specified during the table creation, the field is expected to be present
+// in the given document.
+// If no primary key has been selected, a monotonic autoincremented integer key will be generated.
+func (t *Table) Insert(d document.Document) ([]byte, error) {
+	info, err := t.Info()
 	if err != nil {
 		return nil, err
 	}
 
-	return ti, nil
+	if info.readOnly {
+		return nil, errors.New("cannot write to read-only table")
+	}
+
+	d, err = t.ValidateConstraints(d)
+	if err != nil {
+		return nil, err
+	}
+
+	key, err := t.generateKey(d)
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = t.Store.Get(key)
+	if err == nil {
+		return nil, ErrDuplicateDocument
+	}
+
+	v, err := msgpack.EncodeDocument(d)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode document: %w", err)
+	}
+
+	err = t.Store.Put(key, v)
+	if err != nil {
+		return nil, err
+	}
+
+	indexes, err := t.Indexes()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, idx := range indexes {
+		v, err := idx.Opts.Path.GetValue(d)
+		if err != nil {
+			v = document.NewNullValue()
+		}
+
+		// arrays and documents are not indexed.
+		if v.Type == document.ArrayValue || v.Type == document.DocumentValue {
+			continue
+		}
+
+		err = idx.Set(v, key)
+		if err != nil {
+			if err == index.ErrDuplicate {
+				return nil, ErrDuplicateDocument
+			}
+
+			return nil, err
+		}
+	}
+
+	return key, nil
+}
+
+// Delete a document by key.
+// Indexes are automatically updated.
+func (t *Table) Delete(key []byte) error {
+	info, err := t.Info()
+	if err != nil {
+		return err
+	}
+
+	if info.readOnly {
+		return errors.New("cannot write to read-only table")
+	}
+
+	d, err := t.GetDocument(key)
+	if err != nil {
+		return err
+	}
+
+	indexes, err := t.Indexes()
+	if err != nil {
+		return err
+	}
+
+	for _, idx := range indexes {
+		v, err := idx.Opts.Path.GetValue(d)
+		if err != nil {
+			return err
+		}
+
+		err = idx.Delete(v, key)
+		if err != nil {
+			return err
+		}
+	}
+
+	return t.Store.Delete(key)
+}
+
+// Replace a document by key.
+// An error is returned if the key doesn't exist.
+// Indexes are automatically updated.
+func (t *Table) Replace(key []byte, d document.Document) error {
+	info, err := t.Info()
+	if err != nil {
+		return err
+	}
+
+	if info.readOnly {
+		return errors.New("cannot write to read-only table")
+	}
+
+	d, err = t.ValidateConstraints(d)
+	if err != nil {
+		return err
+	}
+
+	indexes, err := t.Indexes()
+	if err != nil {
+		return err
+	}
+
+	return t.replace(indexes, key, d)
+}
+
+func (t *Table) replace(indexes map[string]Index, key []byte, d document.Document) error {
+	// make sure key exists
+	old, err := t.GetDocument(key)
+	if err != nil {
+		return err
+	}
+
+	// remove key from indexes
+	for _, idx := range indexes {
+		v, err := idx.Opts.Path.GetValue(old)
+		if err != nil {
+			return err
+		}
+
+		err = idx.Delete(v, key)
+		if err != nil {
+			return err
+		}
+	}
+
+	// encode new document
+	v, err := msgpack.EncodeDocument(d)
+	if err != nil {
+		return fmt.Errorf("failed to encode document: %w", err)
+	}
+
+	// replace old document with new document
+	err = t.Store.Put(key, v)
+	if err != nil {
+		return err
+	}
+
+	// update indexes
+	for _, idx := range indexes {
+		v, err := idx.Opts.Path.GetValue(d)
+		if err != nil {
+			continue
+		}
+
+		err = idx.Set(v, key)
+		if err != nil {
+			return err
+		}
+	}
+
+	return err
+}
+
+// Indexes returns a map of all the indexes of a table.
+func (t *Table) Indexes() (map[string]Index, error) {
+	s, err := t.tx.Tx.GetStore([]byte(indexStoreName))
+	if err != nil {
+		return nil, err
+	}
+
+	tb := Table{
+		tx:    t.tx,
+		Store: s,
+		name:  indexStoreName,
+	}
+
+	indexes := make(map[string]Index)
+
+	err = document.NewStream(&tb).
+		Filter(func(d document.Document) (bool, error) {
+			v, err := d.GetByField("tablename")
+			if err != nil {
+				return false, err
+			}
+
+			return v.V.(string) == t.name, nil
+		}).
+		Iterate(func(d document.Document) error {
+			var opts IndexConfig
+			err := opts.ScanDocument(d)
+			if err != nil {
+				return err
+			}
+
+			var idx index.Index
+			if opts.Unique {
+				idx = index.NewUniqueIndex(t.tx.Tx, opts.IndexName)
+			} else {
+				idx = index.NewListIndex(t.tx.Tx, opts.IndexName)
+			}
+
+			indexes[opts.Path.String()] = Index{
+				Index: idx,
+				Opts:  opts,
+			}
+
+			return nil
+		})
+	if err != nil {
+		return nil, err
+	}
+
+	return indexes, nil
 }
 
 type encodedDocumentWithKey struct {
@@ -42,29 +278,65 @@ func (e encodedDocumentWithKey) Key() []byte {
 	return e.key
 }
 
+// This document implementation waits until
+// GetByField or Iterate are called to
+// fetch the value from the engine store.
+// This is useful to prevent reading the value
+// from store on documents that don't need to be
+// decoded.
+type lazilyDecodedDocument struct {
+	item engine.Item
+	buf  msgpack.EncodedDocument
+}
+
+func (d *lazilyDecodedDocument) GetByField(field string) (v document.Value, err error) {
+	if len(d.buf) == 0 {
+		d.copyFromItem()
+	}
+
+	return d.buf.GetByField(field)
+}
+
+func (d *lazilyDecodedDocument) Iterate(fn func(field string, value document.Value) error) error {
+	if len(d.buf) == 0 {
+		d.copyFromItem()
+	}
+
+	return d.buf.Iterate(fn)
+}
+
+func (d *lazilyDecodedDocument) Key() []byte {
+	return d.item.Key()
+}
+
+func (d *lazilyDecodedDocument) Reset() {
+	d.buf = d.buf[:0]
+	d.item = nil
+}
+
+func (d *lazilyDecodedDocument) copyFromItem() error {
+	var err error
+	d.buf, err = d.item.ValueCopy(d.buf[:0])
+
+	return err
+}
+
 // Iterate goes through all the documents of the table and calls the given function by passing each one of them.
 // If the given function returns an error, the iteration stops.
 func (t *Table) Iterate(fn func(d document.Document) error) error {
-	// To avoid unnecessary allocations, we create the slice once and reuse it
-	// at each call of the fn method.
-	// Since the AscendGreaterOrEqual is never supposed to call the callback concurrently
-	// we can assume that it's thread safe.
-	// TODO(asdine) Add a mutex if proven necessary
-	var d encodedDocumentWithKey
+	// To avoid unnecessary allocations, we create the struct once and reuse
+	// it during each iteration.
+	var d lazilyDecodedDocument
 
 	it := t.Store.NewIterator(engine.IteratorConfig{})
 	defer it.Close()
 
 	var err error
 	for it.Seek(nil); it.Valid(); it.Next() {
-		item := it.Item()
-		d.EncodedDocument, err = item.ValueCopy(d.EncodedDocument[:0])
-		if err != nil {
-			return err
-		}
-
-		d.key = item.Key()
-		// r must be passed as pointer, not value, because passing a value to an interface
+		d.Reset()
+		d.item = it.Item()
+		// d must be passed as pointer, not value,
+		// because passing a value to an interface
 		// requires an allocation, while it doesn't for a pointer.
 		err = fn(&d)
 		if err != nil {
@@ -98,7 +370,7 @@ func (t *Table) GetDocument(key []byte) (document.Document, error) {
 // if there are no primary key in the table, a default
 // key is generated, called the docid.
 func (t *Table) generateKey(d document.Document) ([]byte, error) {
-	ti, err := t.infoStore.Get(t.name)
+	ti, err := t.infoStore.Get(t.tx, t.name)
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +384,7 @@ func (t *Table) generateKey(d document.Document) ([]byte, error) {
 			return nil, err
 		}
 
-		return encoding.EncodeValue(v)
+		return key.AppendValue(nil, v), nil
 	}
 
 	docid, err := t.generateDocid()
@@ -120,7 +392,7 @@ func (t *Table) generateKey(d document.Document) ([]byte, error) {
 		return nil, err
 	}
 
-	return encoding.EncodeInt64(docid), nil
+	return key.AppendInt64(nil, docid), nil
 }
 
 // this function looks up for the highest key in the table,
@@ -143,8 +415,9 @@ func (t *Table) generateDocid() (int64, error) {
 		it := t.Store.NewIterator(engine.IteratorConfig{Reverse: true})
 		it.Seek(nil)
 		if it.Valid() {
-			t.tx.db.tableDocids[t.name], err = encoding.DecodeInt64(it.Item().Key())
+			t.tx.db.tableDocids[t.name], err = key.DecodeInt64(it.Item().Key())
 			if err != nil {
+				it.Close()
 				return 0, err
 			}
 		} else {
@@ -180,26 +453,15 @@ func (t *Table) getSmallestAvailableDocid() (int64, error) {
 
 	var i int64 = 1
 
+	var buf [8]byte
 	for it.Seek(nil); it.Valid(); it.Next() {
-		if !bytes.Equal(it.Item().Key(), encoding.EncodeInt64(i)) {
+		if !bytes.Equal(it.Item().Key(), key.AppendInt64(buf[:0], i)) {
 			return i, nil
 		}
 		i++
 	}
 
 	return 0, errors.New("reached maximum number of documents in a table")
-}
-
-func getParentValue(d document.Document, p document.ValuePath) (document.Value, error) {
-	if len(p) == 0 {
-		return document.Value{}, errors.New("empty path")
-	}
-
-	if len(p) == 1 {
-		return document.NewDocumentValue(d), nil
-	}
-
-	return p[:len(p)-1].GetValue(d)
 }
 
 // ValidateConstraints check the table configuration for constraints and validates the document
@@ -284,7 +546,7 @@ func validateConstraint(d document.Document, c *FieldConstraint) error {
 			return nil
 		}
 
-		v, err = v.ConvertTo(c.Type)
+		v, err = v.CastAs(c.Type)
 		if err != nil {
 			return err
 		}
@@ -324,7 +586,7 @@ func validateConstraint(d document.Document, c *FieldConstraint) error {
 			return nil
 		}
 
-		v, err = v.ConvertTo(c.Type)
+		v, err = v.CastAs(c.Type)
 		if err != nil {
 			return err
 		}
@@ -338,66 +600,27 @@ func validateConstraint(d document.Document, c *FieldConstraint) error {
 	return nil
 }
 
-// Insert the document into the table.
-// If a primary key has been specified during the table creation, the field is expected to be present
-// in the given document.
-// If no primary key has been selected, a monotonic autoincremented integer key will be generated.
-func (t *Table) Insert(d document.Document) ([]byte, error) {
-	d, err := t.ValidateConstraints(d)
-	if err != nil {
-		return nil, err
+func getParentValue(d document.Document, p document.ValuePath) (document.Value, error) {
+	if len(p) == 0 {
+		return document.Value{}, errors.New("empty path")
 	}
 
-	key, err := t.generateKey(d)
-	if err != nil {
-		return nil, err
+	if len(p) == 1 {
+		return document.NewDocumentValue(d), nil
 	}
 
-	_, err = t.Store.Get(key)
-	if err == nil {
-		return nil, ErrDuplicateDocument
-	}
-
-	v, err := msgpack.EncodeDocument(d)
-	if err != nil {
-		return nil, fmt.Errorf("failed to encode document: %w", err)
-	}
-
-	err = t.Store.Put(key, v)
-	if err != nil {
-		return nil, err
-	}
-
-	indexes, err := t.Indexes()
-	if err != nil {
-		return nil, err
-	}
-
-	for _, idx := range indexes {
-		v, err := idx.Path.GetValue(d)
-		if err != nil {
-			v = document.NewNullValue()
-		}
-
-		err = idx.Set(v, key)
-		if err != nil {
-			if err == index.ErrDuplicate {
-				return nil, ErrDuplicateDocument
-			}
-
-			return nil, err
-		}
-	}
-
-	return key, nil
+	return p[:len(p)-1].GetValue(d)
 }
 
-// Delete a document by key.
-// Indexes are automatically updated.
-func (t *Table) Delete(key []byte) error {
-	d, err := t.GetDocument(key)
+// ReIndex all the indexes of the table.
+func (t *Table) ReIndex() error {
+	info, err := t.Info()
 	if err != nil {
 		return err
+	}
+
+	if info.readOnly {
+		return errors.New("cannot write to read-only table")
 	}
 
 	indexes, err := t.Indexes()
@@ -406,152 +629,11 @@ func (t *Table) Delete(key []byte) error {
 	}
 
 	for _, idx := range indexes {
-		v, err := idx.Path.GetValue(d)
-		if err != nil {
-			return err
-		}
-
-		err = idx.Delete(v, key)
+		err = t.tx.ReIndex(idx.Opts.IndexName)
 		if err != nil {
 			return err
 		}
 	}
 
-	return t.Store.Delete(key)
-}
-
-// Replace a document by key.
-// An error is returned if the key doesn't exist.
-// Indexes are automatically updated.
-func (t *Table) Replace(key []byte, d document.Document) error {
-	d, err := t.ValidateConstraints(d)
-	if err != nil {
-		return err
-	}
-
-	indexes, err := t.Indexes()
-	if err != nil {
-		return err
-	}
-
-	return t.replace(indexes, key, d)
-}
-
-func (t *Table) replace(indexes map[string]Index, key []byte, d document.Document) error {
-	// make sure key exists
-	old, err := t.GetDocument(key)
-	if err != nil {
-		return err
-	}
-
-	// remove key from indexes
-	for _, idx := range indexes {
-		v, err := idx.Path.GetValue(old)
-		if err != nil {
-			return err
-		}
-
-		err = idx.Delete(v, key)
-		if err != nil {
-			return err
-		}
-	}
-
-	// encode new document
-	v, err := msgpack.EncodeDocument(d)
-	if err != nil {
-		return fmt.Errorf("failed to encode document: %w", err)
-	}
-
-	// replace old document with new document
-	err = t.Store.Put(key, v)
-	if err != nil {
-		return err
-	}
-
-	// update indexes
-	for _, idx := range indexes {
-		v, err := idx.Path.GetValue(d)
-		if err != nil {
-			continue
-		}
-
-		err = idx.Set(v, key)
-		if err != nil {
-			return err
-		}
-	}
-
-	return err
-}
-
-// Truncate deletes all the documents from the table.
-func (t *Table) Truncate() error {
-	return t.Store.Truncate()
-}
-
-// Name returns the name of the table.
-func (t *Table) Name() string {
-	return t.name
-}
-
-// Indexes returns a map of all the indexes of a table.
-func (t *Table) Indexes() (map[string]Index, error) {
-	s, err := t.tx.Tx.GetStore([]byte(indexStoreName))
-	if err != nil {
-		return nil, err
-	}
-
-	tb := Table{
-		tx:    t.tx,
-		Store: s,
-		name:  indexStoreName,
-	}
-
-	tableName := []byte(t.name)
-	indexes := make(map[string]Index)
-
-	err = document.NewStream(&tb).
-		Filter(func(d document.Document) (bool, error) {
-			v, err := d.GetByField("tablename")
-			if err != nil {
-				return false, err
-			}
-
-			b, err := v.ConvertToBytes()
-			if err != nil {
-				return false, err
-			}
-
-			return bytes.Equal(b, tableName), nil
-		}).
-		Iterate(func(d document.Document) error {
-			var opts IndexConfig
-			err := opts.ScanDocument(d)
-			if err != nil {
-				return err
-			}
-
-			var idx index.Index
-			if opts.Unique {
-				idx = index.NewUniqueIndex(t.tx.Tx, opts.IndexName)
-			} else {
-				idx = index.NewListIndex(t.tx.Tx, opts.IndexName)
-			}
-
-			indexes[opts.Path.String()] = Index{
-				Index:     idx,
-				IndexName: opts.IndexName,
-				TableName: opts.TableName,
-				Path:      opts.Path,
-				Unique:    opts.Unique,
-			}
-
-			return nil
-		})
-	if err != nil {
-		return nil, err
-	}
-
-	return indexes, nil
+	return nil
 }

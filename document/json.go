@@ -9,9 +9,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
-	"strings"
-
-	"github.com/genjidb/genji/pkg/bytesutil"
+	"time"
 )
 
 // NewFromJSON creates a document from a JSON object.
@@ -30,29 +28,13 @@ func (v Value) MarshalJSON() ([]byte, error) {
 
 	switch v.Type {
 	case DocumentValue:
-		d, err := v.ConvertToDocument()
-		if err != nil {
-			return nil, err
-		}
-		return jsonDocument{d}.MarshalJSON()
+		return jsonDocument{v.V.(Document)}.MarshalJSON()
 	case ArrayValue:
-		a, err := v.ConvertToArray()
-		if err != nil {
-			return nil, err
-		}
-		return jsonArray{a}.MarshalJSON()
+		return jsonArray{v.V.(Array)}.MarshalJSON()
 	case TextValue:
-		s, err := v.ConvertToString()
-		if err != nil {
-			return nil, err
-		}
-		x = s
+		x = string(v.V.(string))
 	case DurationValue:
-		d, err := v.ConvertToDuration()
-		if err != nil {
-			return nil, err
-		}
-		x = d.String()
+		x = v.V.(time.Duration).String()
 	default:
 		x = v.V
 	}
@@ -81,7 +63,7 @@ func (v Value) String() string {
 	case NullValue:
 		return "NULL"
 	case TextValue:
-		return strconv.Quote(string(v.V.([]byte)))
+		return strconv.Quote(v.V.(string))
 	case BlobValue, DurationValue:
 		return fmt.Sprintf("%v", v.V)
 	}
@@ -377,51 +359,4 @@ func IteratorToJSONArray(w io.Writer, s Iterator) error {
 
 	buf.WriteByte(']')
 	return buf.Flush()
-}
-
-// Compare compares two values performing best-effort comparisons
-// Returns > 0 if this value can be considered bigger
-// Returns < 0 if this value can be considered smaller
-// Returns 0 if values can be considered equal
-func (v Value) Compare(u Value) int {
-	if v.Type == NullValue && u.Type == NullValue {
-		return 0
-	}
-	// Null is always less than non-null
-	if v.Type == NullValue {
-		return -1
-	}
-	if u.Type == NullValue {
-		return 1
-	}
-
-	un := v.Type.IsNumber() || v.Type == BoolValue
-	vn := u.Type.IsNumber() || u.Type == BoolValue
-
-	// if any of the values is a number, perform a best effort numeric comparison
-	if un || vn {
-		var vf float64
-		var uf float64
-		if un {
-			vf, _ = v.ConvertToFloat64()
-		} else {
-			vf, _ = strconv.ParseFloat(v.String(), 64)
-		}
-		if vn {
-			uf, _ = u.ConvertToFloat64()
-		} else {
-			uf, _ = strconv.ParseFloat(u.String(), 64)
-		}
-		return int(vf - uf)
-	}
-
-	// compare byte arrays and strings
-	if (v.Type == TextValue || v.Type == BlobValue) && (u.Type == TextValue || u.Type == BlobValue) {
-		bv, _ := v.ConvertToBytes()
-		bu, _ := u.ConvertToBytes()
-		return bytesutil.CompareBytes(bv, bu)
-	}
-
-	// if all else fails, compare string representation of values
-	return strings.Compare(v.String(), u.String())
 }

@@ -8,9 +8,9 @@ import (
 
 	"github.com/genjidb/genji/database"
 	"github.com/genjidb/genji/document"
-	"github.com/genjidb/genji/document/encoding"
 	"github.com/genjidb/genji/document/encoding/msgpack"
 	"github.com/genjidb/genji/engine/memoryengine"
+	"github.com/genjidb/genji/key"
 	"github.com/stretchr/testify/require"
 )
 
@@ -177,10 +177,10 @@ func TestTableInsert(t *testing.T) {
 
 		key2 := insertDoc(db)
 
-		a, err := encoding.DecodeInt64(key1)
+		a, err := key.DecodeInt64(key1)
 		require.NoError(t, err)
 
-		b, err := encoding.DecodeInt64(key2)
+		b, err := key.DecodeInt64(key2)
 		require.NoError(t, err)
 
 		require.Equal(t, a+1, b)
@@ -197,7 +197,7 @@ func TestTableInsert(t *testing.T) {
 		require.NoError(t, err)
 
 		manualInsert := func(id int64) {
-			docid := encoding.EncodeInt64(id)
+			docid := key.AppendInt64(nil, id)
 			v, err := msgpack.EncodeDocument(newDocument())
 			require.NoError(t, err)
 			err = tb.Store.Put(docid, v)
@@ -210,7 +210,7 @@ func TestTableInsert(t *testing.T) {
 		manualInsert(2)
 
 		expectDocid := func(want int64, got []byte) {
-			newDocid, err := encoding.DecodeInt64(got)
+			newDocid, err := key.DecodeInt64(got)
 			require.NoError(t, err)
 			require.Equal(t, want, newDocid)
 		}
@@ -244,16 +244,16 @@ func TestTableInsert(t *testing.T) {
 		require.NoError(t, err)
 
 		// insert
-		key, err := tb.Insert(doc)
+		k, err := tb.Insert(doc)
 		require.NoError(t, err)
-		require.Equal(t, encoding.EncodeInt64(10), key)
+		require.Equal(t, key.AppendInt64(nil, 10), k)
 
 		// make sure the document is fetchable using the returned key
-		_, err = tb.GetDocument(key)
+		_, err = tb.GetDocument(k)
 		require.NoError(t, err)
 
 		// insert again
-		key, err = tb.Insert(doc)
+		k, err = tb.Insert(doc)
 		require.Equal(t, database.ErrDuplicateDocument, err)
 	})
 
@@ -348,7 +348,7 @@ func TestTableInsert(t *testing.T) {
 		require.NoError(t, err)
 
 		var count int
-		err = idx.AscendGreaterOrEqual(nil, func(val document.Value, k []byte) error {
+		err = idx.AscendGreaterOrEqual(document.Value{}, func(val, k []byte, isEqual bool) error {
 			switch count {
 			case 0:
 				// key2, which doesn't countain the field must appear first in the next,
@@ -559,14 +559,14 @@ func TestTableReplace(t *testing.T) {
 		require.NoError(t, err)
 		f, err := res.GetByField("fielda")
 		require.NoError(t, err)
-		require.Equal(t, "e", string(f.V.([]byte)))
+		require.Equal(t, "e", f.V.(string))
 
 		// make sure it didn't also replace the other one
 		res, err = tb.GetDocument(key2)
 		require.NoError(t, err)
 		f, err = res.GetByField("fielda")
 		require.NoError(t, err)
-		require.Equal(t, "c", string(f.V.([]byte)))
+		require.Equal(t, "c", f.V.(string))
 	})
 }
 
@@ -601,6 +601,94 @@ func TestTableTruncate(t *testing.T) {
 		})
 
 		require.NoError(t, err)
+	})
+}
+
+func TestTableReIndex(t *testing.T) {
+	t.Run("Should succeed if table has no index", func(t *testing.T) {
+		tb, cleanup := newTestTable(t)
+		defer cleanup()
+
+		err := tb.ReIndex()
+		require.NoError(t, err)
+	})
+
+	t.Run("Should reindex the right indexes", func(t *testing.T) {
+		tx, cleanup := newTestDB(t)
+		defer cleanup()
+
+		err := tx.CreateTable("test1", nil)
+		require.NoError(t, err)
+		err = tx.CreateTable("test2", nil)
+		require.NoError(t, err)
+		tb1, err := tx.GetTable("test1")
+		require.NoError(t, err)
+		tb2, err := tx.GetTable("test2")
+		require.NoError(t, err)
+
+		for i := int64(0); i < 10; i++ {
+			doc := document.NewFieldBuffer().
+				Add("a", document.NewIntegerValue(i)).
+				Add("b", document.NewIntegerValue(i*10))
+			_, err = tb1.Insert(doc)
+			require.NoError(t, err)
+			_, err = tb2.Insert(doc)
+			require.NoError(t, err)
+		}
+
+		err = tx.CreateIndex(database.IndexConfig{
+			IndexName: "test1a",
+			TableName: "test1",
+			Path:      document.NewValuePath("a"),
+		})
+		require.NoError(t, err)
+		err = tx.CreateIndex(database.IndexConfig{
+			IndexName: "test1b",
+			TableName: "test1",
+			Path:      document.NewValuePath("b"),
+		})
+		require.NoError(t, err)
+		err = tx.CreateIndex(database.IndexConfig{
+			IndexName: "test2a",
+			TableName: "test2",
+			Path:      document.NewValuePath("a"),
+		})
+		require.NoError(t, err)
+		err = tx.CreateIndex(database.IndexConfig{
+			IndexName: "test2b",
+			TableName: "test2",
+			Path:      document.NewValuePath("b"),
+		})
+		require.NoError(t, err)
+
+		err = tb1.ReIndex()
+		require.NoError(t, err)
+
+		countIndexElems := func(idx *database.Index) int {
+			var i int
+			err = idx.AscendGreaterOrEqual(document.Value{Type: document.IntegerValue}, func(v, k []byte, isEqual bool) error {
+				i++
+				return nil
+			})
+			require.NoError(t, err)
+			return i
+		}
+
+		idx, err := tx.GetIndex("test1a")
+		require.NoError(t, err)
+		require.Equal(t, 10, countIndexElems(idx))
+
+		idx, err = tx.GetIndex("test1b")
+		require.NoError(t, err)
+		require.Equal(t, 10, countIndexElems(idx))
+
+		idx, err = tx.GetIndex("test2a")
+		require.NoError(t, err)
+		require.Equal(t, 0, countIndexElems(idx))
+
+		idx, err = tx.GetIndex("test2b")
+		require.NoError(t, err)
+		require.Equal(t, 0, countIndexElems(idx))
 	})
 }
 

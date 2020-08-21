@@ -7,11 +7,10 @@ import (
 
 	"github.com/genjidb/genji/database"
 	"github.com/genjidb/genji/document"
-	"github.com/genjidb/genji/document/encoding"
 	"github.com/genjidb/genji/document/encoding/msgpack"
 	"github.com/genjidb/genji/engine"
 	"github.com/genjidb/genji/index"
-	"github.com/genjidb/genji/pkg/bytesutil"
+	"github.com/genjidb/genji/key"
 	"github.com/genjidb/genji/sql/scanner"
 )
 
@@ -37,19 +36,14 @@ func Eq(a, b Expr) Expr {
 var errStop = errors.New("errStop")
 
 func (op eqOp) IterateIndex(idx index.Index, tb *database.Table, v document.Value, fn func(d document.Document) error) error {
-	err := idx.AscendGreaterOrEqual(&index.Pivot{Value: v}, func(val document.Value, key []byte) error {
-		ok, err := v.IsEqual(val)
-		if err != nil {
-			return err
-		}
-
-		if ok {
-			r, err := tb.GetDocument(key)
+	err := idx.AscendGreaterOrEqual(v, func(val, key []byte, isEqual bool) error {
+		if isEqual {
+			d, err := tb.GetDocument(key)
 			if err != nil {
 				return err
 			}
 
-			return fn(r)
+			return fn(d)
 		}
 
 		return errStop
@@ -63,15 +57,12 @@ func (op eqOp) IterateIndex(idx index.Index, tb *database.Table, v document.Valu
 }
 
 func (op eqOp) IteratePK(tb *database.Table, v document.Value, pkType document.ValueType, fn func(d document.Document) error) error {
-	v, err := v.ConvertTo(pkType)
+	v, err := v.CastAs(pkType)
 	if err != nil {
 		return nil
 	}
 
-	data, err := encoding.EncodeValue(v)
-	if err != nil {
-		return err
-	}
+	data := key.AppendValue(nil, v)
 
 	val, err := tb.Store.Get(data)
 	if err != nil {
@@ -111,22 +102,17 @@ func Gt(a, b Expr) Expr {
 }
 
 func (op gtOp) IterateIndex(idx index.Index, tb *database.Table, v document.Value, fn func(d document.Document) error) error {
-	err := idx.AscendGreaterOrEqual(&index.Pivot{Value: v}, func(val document.Value, key []byte) error {
-		ok, err := v.IsEqual(val)
-		if err != nil {
-			return err
-		}
-
-		if ok {
+	err := idx.AscendGreaterOrEqual(v, func(val, key []byte, isEqual bool) error {
+		if isEqual {
 			return nil
 		}
 
-		r, err := tb.GetDocument(key)
+		d, err := tb.GetDocument(key)
 		if err != nil {
 			return err
 		}
 
-		return fn(r)
+		return fn(d)
 	})
 
 	if err != nil && err != errStop {
@@ -137,17 +123,14 @@ func (op gtOp) IterateIndex(idx index.Index, tb *database.Table, v document.Valu
 }
 
 func (op gtOp) IteratePK(tb *database.Table, v document.Value, pkType document.ValueType, fn func(d document.Document) error) error {
-	v, err := v.ConvertTo(pkType)
+	v, err := v.CastAs(pkType)
 	if err != nil {
 		return err
 	}
 
 	var d msgpack.EncodedDocument
 
-	data, err := encoding.EncodeValue(v)
-	if err != nil {
-		return err
-	}
+	data := key.AppendValue(nil, v)
 
 	it := tb.Store.NewIterator(engine.IteratorConfig{})
 	defer it.Close()
@@ -184,13 +167,13 @@ func Gte(a, b Expr) Expr {
 }
 
 func (op gteOp) IterateIndex(idx index.Index, tb *database.Table, v document.Value, fn func(d document.Document) error) error {
-	err := idx.AscendGreaterOrEqual(&index.Pivot{Value: v}, func(val document.Value, key []byte) error {
-		r, err := tb.GetDocument(key)
+	err := idx.AscendGreaterOrEqual(v, func(val, key []byte, isEqual bool) error {
+		d, err := tb.GetDocument(key)
 		if err != nil {
 			return err
 		}
 
-		return fn(r)
+		return fn(d)
 	})
 
 	if err != nil && err != errStop {
@@ -201,17 +184,14 @@ func (op gteOp) IterateIndex(idx index.Index, tb *database.Table, v document.Val
 }
 
 func (op gteOp) IteratePK(tb *database.Table, v document.Value, pkType document.ValueType, fn func(d document.Document) error) error {
-	v, err := v.ConvertTo(pkType)
+	v, err := v.CastAs(pkType)
 	if err != nil {
 		return err
 	}
 
 	var d msgpack.EncodedDocument
 
-	data, err := encoding.EncodeValue(v)
-	if err != nil {
-		return err
-	}
+	data := key.AppendValue(nil, v)
 
 	it := tb.Store.NewIterator(engine.IteratorConfig{})
 	defer it.Close()
@@ -245,22 +225,27 @@ func Lt(a, b Expr) Expr {
 }
 
 func (op ltOp) IterateIndex(idx index.Index, tb *database.Table, v document.Value, fn func(d document.Document) error) error {
-	err := idx.AscendGreaterOrEqual(index.EmptyPivot(v.Type), func(val document.Value, key []byte) error {
-		ok, err := v.IsLesserThanOrEqual(val)
+	var err error
+
+	if v.Type == document.IntegerValue {
+		v, err = v.CastAsDouble()
 		if err != nil {
 			return err
 		}
+	}
 
-		if ok {
+	enc := key.AppendValue(nil, v)
+	err = idx.AscendGreaterOrEqual(document.Value{Type: v.Type}, func(val, key []byte, isEqual bool) error {
+		if bytes.Compare(enc, val) <= 0 {
 			return errStop
 		}
 
-		r, err := tb.GetDocument(key)
+		d, err := tb.GetDocument(key)
 		if err != nil {
 			return err
 		}
 
-		return fn(r)
+		return fn(d)
 	})
 
 	if err != nil && err != errStop {
@@ -271,17 +256,14 @@ func (op ltOp) IterateIndex(idx index.Index, tb *database.Table, v document.Valu
 }
 
 func (op ltOp) IteratePK(tb *database.Table, v document.Value, pkType document.ValueType, fn func(d document.Document) error) error {
-	v, err := v.ConvertTo(pkType)
+	v, err := v.CastAs(pkType)
 	if err != nil {
 		return err
 	}
 
 	var d msgpack.EncodedDocument
 
-	data, err := encoding.EncodeValue(v)
-	if err != nil {
-		return err
-	}
+	data := key.AppendValue(nil, v)
 
 	it := tb.Store.NewIterator(engine.IteratorConfig{})
 	defer it.Close()
@@ -291,7 +273,7 @@ func (op ltOp) IteratePK(tb *database.Table, v document.Value, pkType document.V
 		if err != nil {
 			return err
 		}
-		if bytesutil.CompareBytes(data, d) <= 0 {
+		if bytes.Compare(data, d) <= 0 {
 			break
 		}
 
@@ -318,22 +300,27 @@ func Lte(a, b Expr) Expr {
 }
 
 func (op lteOp) IterateIndex(idx index.Index, tb *database.Table, v document.Value, fn func(d document.Document) error) error {
-	err := idx.AscendGreaterOrEqual(index.EmptyPivot(v.Type), func(val document.Value, key []byte) error {
-		ok, err := v.IsLesserThan(val)
+	var err error
+
+	if v.Type == document.IntegerValue {
+		v, err = v.CastAsDouble()
 		if err != nil {
 			return err
 		}
+	}
 
-		if ok {
+	enc := key.AppendValue(nil, v)
+	err = idx.AscendGreaterOrEqual(document.Value{Type: v.Type}, func(val, key []byte, isEqual bool) error {
+		if bytes.Compare(enc, val) < 0 {
 			return errStop
 		}
 
-		r, err := tb.GetDocument(key)
+		d, err := tb.GetDocument(key)
 		if err != nil {
 			return err
 		}
 
-		return fn(r)
+		return fn(d)
 	})
 
 	if err != nil && err != errStop {
@@ -344,17 +331,14 @@ func (op lteOp) IterateIndex(idx index.Index, tb *database.Table, v document.Val
 }
 
 func (op lteOp) IteratePK(tb *database.Table, v document.Value, pkType document.ValueType, fn func(d document.Document) error) error {
-	v, err := v.ConvertTo(pkType)
+	v, err := v.CastAs(pkType)
 	if err != nil {
 		return err
 	}
 
 	var d msgpack.EncodedDocument
 
-	data, err := encoding.EncodeValue(v)
-	if err != nil {
-		return err
-	}
+	data := key.AppendValue(nil, v)
 
 	it := tb.Store.NewIterator(engine.IteratorConfig{})
 	defer it.Close()
@@ -364,7 +348,7 @@ func (op lteOp) IteratePK(tb *database.Table, v document.Value, pkType document.
 		if err != nil {
 			return err
 		}
-		if bytesutil.CompareBytes(data, d) < 0 {
+		if bytes.Compare(data, d) < 0 {
 			break
 		}
 
@@ -474,12 +458,7 @@ func (op inOp) Eval(ctx EvalStack) (document.Value, error) {
 		return falseLitteral, nil
 	}
 
-	arr, err := b.ConvertToArray()
-	if err != nil {
-		return nullLitteral, err
-	}
-
-	ok, err := document.ArrayContains(arr, a)
+	ok, err := document.ArrayContains(b.V.(document.Array), a)
 	if err != nil {
 		return nullLitteral, err
 	}
@@ -495,13 +474,8 @@ func (op inOp) IterateIndex(idx index.Index, tb *database.Table, v document.Valu
 		return errors.New("IN operator takes an array")
 	}
 
-	a, err := v.ConvertToArray()
-	if err != nil {
-		return err
-	}
-
 	var eq eqOp
-	return a.Iterate(func(i int, value document.Value) error {
+	return v.V.(document.Array).Iterate(func(i int, value document.Value) error {
 		return eq.IterateIndex(idx, tb, value, fn)
 	})
 }
@@ -514,21 +488,14 @@ func (op inOp) IteratePK(tb *database.Table, v document.Value, pkType document.V
 	}
 
 	var d msgpack.EncodedDocument
-	arr, err := v.ConvertToArray()
-	if err != nil {
-		return err
-	}
 
-	return arr.Iterate(func(i int, value document.Value) error {
-		val, err := value.ConvertTo(pkType)
+	return v.V.(document.Array).Iterate(func(i int, value document.Value) error {
+		val, err := value.CastAs(pkType)
 		if err != nil {
 			return nil
 		}
 
-		data, err := encoding.EncodeValue(val)
-		if err != nil {
-			return err
-		}
+		data := key.AppendValue(nil, val)
 
 		d, err = tb.Store.Get(data)
 		if err != nil {

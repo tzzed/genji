@@ -210,16 +210,10 @@ func TestFieldBuffer(t *testing.T) {
 					Add("e", document.NewDocumentValue(document.NewFieldBuffer().Add("f", document.NewTextValue("g")))),
 				false},
 			{"string values", `{"a": "hello ciao"}`, document.NewFieldBuffer().Add("a", document.NewTextValue("hello ciao")), false},
-			{"+int8 values", `{"a": 1}`, document.NewFieldBuffer().Add("a", document.NewIntegerValue(1)), false},
-			{"-int8 values", `{"a": -1}`, document.NewFieldBuffer().Add("a", document.NewIntegerValue(-1)), false},
-			{"+int16 values", `{"a": 1000}`, document.NewFieldBuffer().Add("a", document.NewIntegerValue(1000)), false},
-			{"-int16 values", `{"a": 1000}`, document.NewFieldBuffer().Add("a", document.NewIntegerValue(1000)), false},
-			{"+int32 values", `{"a": 1000000}`, document.NewFieldBuffer().Add("a", document.NewIntegerValue(1000000)), false},
-			{"-int32 values", `{"a": 1000000}`, document.NewFieldBuffer().Add("a", document.NewIntegerValue(1000000)), false},
-			{"+int64 values", `{"a": 10000000000}`, document.NewFieldBuffer().Add("a", document.NewIntegerValue(10000000000)), false},
-			{"-int64 values", `{"a": -10000000000}`, document.NewFieldBuffer().Add("a", document.NewIntegerValue(-10000000000)), false},
-			{"+float64 values", `{"a": 10000000000.0}`, document.NewFieldBuffer().Add("a", document.NewDoubleValue(10000000000)), false},
-			{"-float64 values", `{"a": -10000000000.0}`, document.NewFieldBuffer().Add("a", document.NewDoubleValue(-10000000000)), false},
+			{"+integer values", `{"a": 1000}`, document.NewFieldBuffer().Add("a", document.NewIntegerValue(1000)), false},
+			{"-integer values", `{"a": -1000}`, document.NewFieldBuffer().Add("a", document.NewIntegerValue(-1000)), false},
+			{"+float values", `{"a": 10000000000.0}`, document.NewFieldBuffer().Add("a", document.NewDoubleValue(10000000000)), false},
+			{"-float values", `{"a": -10000000000.0}`, document.NewFieldBuffer().Add("a", document.NewDoubleValue(-10000000000)), false},
 			{"bool values", `{"a": true, "b": false}`, document.NewFieldBuffer().Add("a", document.NewBoolValue(true)).Add("b", document.NewBoolValue(false)), false},
 			{"empty arrays", `{"a": []}`, document.NewFieldBuffer().Add("a", document.NewArrayValue(document.NewValueBuffer())), false},
 			{"nested arrays", `{"a": [[1,  2]]}`, document.NewFieldBuffer().
@@ -266,7 +260,7 @@ func TestNewFromMap(t *testing.T) {
 			counter[f]++
 			switch f {
 			case "name":
-				require.Equal(t, m[f], string(v.V.([]byte)))
+				require.Equal(t, m[f], v.V.(string))
 			default:
 				require.EqualValues(t, m[f], v.V)
 			}
@@ -395,7 +389,7 @@ func TestNewFromStruct(t *testing.T) {
 			case 0:
 				require.Equal(t, u.A, v.V.([]byte))
 			case 1:
-				require.Equal(t, u.B, string(v.V.([]byte)))
+				require.Equal(t, u.B, v.V.(string))
 			case 2:
 				require.Equal(t, u.C, v.V.(bool))
 			case 3:
@@ -468,7 +462,7 @@ func TestNewFromStruct(t *testing.T) {
 		require.Equal(t, u.A, v.V.([]byte))
 		v, err = doc.GetByField("b")
 		require.NoError(t, err)
-		require.Equal(t, u.B, string(v.V.([]byte)))
+		require.Equal(t, u.B, v.V.(string))
 		v, err = doc.GetByField("c")
 		require.NoError(t, err)
 		require.Equal(t, u.C, v.V.(bool))
@@ -508,16 +502,16 @@ func TestNewFromStruct(t *testing.T) {
 
 		v, err = doc.GetByField("o")
 		require.NoError(t, err)
-		d, err := v.ConvertToDocument()
-		require.NoError(t, err)
+		d, ok := v.V.(document.Document)
+		require.True(t, ok)
 		v, err = d.GetByField("a")
 		require.NoError(t, err)
 		require.EqualValues(t, 0, v.V.(int64))
 
 		v, err = doc.GetByField("t")
 		require.NoError(t, err)
-		a, err := v.ConvertToArray()
-		require.NoError(t, err)
+		a, ok := v.V.(document.Array)
+		require.True(t, ok)
 		var count int
 		err = a.Iterate(func(i int, v document.Value) error {
 			count++

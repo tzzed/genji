@@ -8,60 +8,120 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestTableInfoStore(t *testing.T) {
-	ng := memoryengine.NewEngine()
-	defer ng.Close()
-
-	tx, err := ng.Begin(true)
-	require.NoError(t, err)
-	defer tx.Rollback()
-
-	err = tx.CreateStore([]byte("foo"))
-	require.NoError(t, err)
-	st, err := tx.GetStore([]byte("foo"))
-	require.NoError(t, err)
-
-	tcs := tableInfoStore{st}
-
+func TestTableInfo(t *testing.T) {
 	info := &TableInfo{
 		FieldConstraints: []FieldConstraint{
 			{Path: []string{"k"}, Type: document.DoubleValue, IsPrimaryKey: true},
 		},
 	}
 
-	// Inserting one tableInfo should work.
-	sid, err := tcs.Insert("foo1", info)
+	doc := info.ToDocument()
+
+	var res TableInfo
+	err := res.ScanDocument(doc)
 	require.NoError(t, err)
-	require.NotNil(t, sid)
+}
 
-	// Inserting an existing tableInfo should not work.
-	_, err = tcs.Insert("foo1", info)
-	require.Equal(t, err, ErrTableAlreadyExists)
+func TestTableInfoStore(t *testing.T) {
+	t.Run("ok", func(t *testing.T) {
+		ng := memoryengine.NewEngine()
+		defer ng.Close()
 
-	// Listing all tables should return their name
-	// lexicographically ordered.
-	_, _ = tcs.Insert("foo3", info)
-	_, _ = tcs.Insert("foo2", info)
-	lt, err := tcs.ListTables()
-	require.NoError(t, err)
-	require.Equal(t, []string{"foo1", "foo2", "foo3"}, lt)
+		db, err := New(ng)
+		require.NoError(t, err)
+		defer db.Close()
 
-	// Getting an existing tableInfo should work.
-	received, err := tcs.Get("foo1")
-	require.NoError(t, err)
-	require.NotNil(t, received.storeID)
+		tx, err := db.Begin(true)
+		require.NoError(t, err)
+		defer tx.Rollback()
 
-	// Getting a non-existing tableInfo should not work.
-	_, err = tcs.Get("unknown")
-	require.Equal(t, ErrTableNotFound, err)
+		info := &TableInfo{
+			FieldConstraints: []FieldConstraint{
+				{Path: []string{"k"}, Type: document.DoubleValue, IsPrimaryKey: true},
+			},
+		}
 
-	// Deleting an existing tableInfo should work.
-	err = tcs.Delete("foo1")
-	require.NoError(t, err)
+		// Inserting one TableInfo should work.
+		err = tx.tableInfoStore.Insert(tx, "foo1", info)
+		require.NoError(t, err)
 
-	// Deleting a non-existing tableInfo should not work.
-	err = tcs.Delete("foo1")
-	require.Equal(t, ErrTableNotFound, err)
+		// Inserting an existing TableInfo should not work.
+		err = tx.tableInfoStore.Insert(tx, "foo1", info)
+		require.Equal(t, err, ErrTableAlreadyExists)
+
+		// Getting an existing TableInfo should work.
+		_, err = tx.tableInfoStore.Get(tx, "foo1")
+		require.NoError(t, err)
+
+		// Getting a non-existing TableInfo should not work.
+		_, err = tx.tableInfoStore.Get(tx, "unknown")
+		require.Equal(t, ErrTableNotFound, err)
+
+		// Deleting an existing TableInfo should work.
+		err = tx.tableInfoStore.Delete(tx, "foo1")
+		require.NoError(t, err)
+
+		// Deleting a non-existing TableInfo should not work.
+		err = tx.tableInfoStore.Delete(tx, "foo1")
+		require.Equal(t, ErrTableNotFound, err)
+	})
+
+	t.Run("on rollback", func(t *testing.T) {
+		ng := memoryengine.NewEngine()
+		defer ng.Close()
+
+		db, err := New(ng)
+		require.NoError(t, err)
+		defer db.Close()
+
+		info := &TableInfo{
+			FieldConstraints: []FieldConstraint{
+				{Path: []string{"k"}, Type: document.DoubleValue, IsPrimaryKey: true},
+			},
+		}
+
+		insertAndRollback := func() {
+			tx, err := db.Begin(true)
+			require.NoError(t, err)
+			err = tx.tableInfoStore.Insert(tx, "foo", info)
+			require.NoError(t, err)
+			err = tx.Rollback()
+			require.NoError(t, err)
+		}
+
+		insertAndRollback()
+		insertAndRollback()
+	})
+
+	t.Run("on commit", func(t *testing.T) {
+		ng := memoryengine.NewEngine()
+		defer ng.Close()
+
+		db, err := New(ng)
+		require.NoError(t, err)
+		defer db.Close()
+
+		info := &TableInfo{
+			FieldConstraints: []FieldConstraint{
+				{Path: []string{"k"}, Type: document.DoubleValue, IsPrimaryKey: true},
+			},
+		}
+
+		insertAndCommit := func() error {
+			tx, err := db.Begin(true)
+			require.NoError(t, err)
+			defer tx.Rollback()
+
+			err = tx.tableInfoStore.Insert(tx, "foo", info)
+			if err != nil {
+				return err
+			}
+			return tx.Commit()
+		}
+
+		require.NoError(t, insertAndCommit())
+		require.Error(t, insertAndCommit())
+	})
 }
 
 func TestIndexStore(t *testing.T) {
@@ -96,6 +156,14 @@ func TestIndexStore(t *testing.T) {
 		idxcfg, err := idxs.Get("idx_test")
 		require.NoError(t, err)
 		require.Equal(t, &cfg, idxcfg)
+
+		// Updating the index should work
+		cfg.Unique = false
+		err = idxs.Replace(cfg.IndexName, cfg)
+		require.NoError(t, err)
+		idxcfg, err = idxs.Get("idx_test")
+		require.NoError(t, err)
+		require.False(t, idxcfg.Unique)
 
 		err = idxs.Delete("idx_test")
 		require.NoError(t, err)

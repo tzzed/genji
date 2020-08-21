@@ -29,12 +29,15 @@ func TestInsertStmt(t *testing.T) {
 		{"Values / Named Params", "INSERT INTO test (a, b, c) VALUES ($d, 'e', $f)", false, `{"pk()":1,"a":"d","b":"e","c":"f"}`, []interface{}{sql.Named("f", "f"), sql.Named("d", "d")}},
 		{"Values / Invalid params", "INSERT INTO test (a, b, c) VALUES ('d', ?)", true, "", []interface{}{'e'}},
 		{"Values / List", `INSERT INTO test (a, b, c) VALUES ("a", 'b', [1, 2, 3])`, false, `{"pk()":1,"a":"a","b":"b","c":[1,2,3]}`, nil},
+		{"Values / Document", `INSERT INTO test (a, b, c) VALUES ("a", 'b', {c: 1, d: c + 1})`, false, `{"pk()":1,"a":"a","b":"b","c":{"c":1,"d":2}}`, nil},
 		{"Documents", "INSERT INTO test VALUES {a: 'a', b: 2.3, c: 1 = 1}", false, `{"pk()":1,"a":"a","b":2.3,"c":true}`, nil},
 		{"Documents / Positional Params", "INSERT INTO test VALUES {a: ?, b: 2.3, c: ?}", false, `{"pk()":1,"a":"a","b":2.3,"c":true}`, []interface{}{"a", true}},
 		{"Documents / Named Params", "INSERT INTO test VALUES {a: $a, b: 2.3, c: $c}", false, `{"pk()":1,"a":1,"b":2.3,"c":true}`, []interface{}{sql.Named("c", true), sql.Named("a", 1)}},
 		{"Documents / List ", "INSERT INTO test VALUES {a: [1, 2, 3]}", false, `{"pk()":1,"a":[1,2,3]}`, nil},
 		{"Documents / strings", `INSERT INTO test VALUES {'a': 'a', b: 2.3}`, false, `{"pk()":1,"a":"a","b":2.3}`, nil},
 		{"Documents / double quotes", `INSERT INTO test VALUES {"a": "b"}`, false, `{"pk()":1,"a":"b"}`, nil},
+		{"Documents / with reference to other fields", `INSERT INTO test VALUES {a: 400, b: a * 4}`, false, `{"pk()":1,"a":400,"b":1600}`, nil},
+		{"Read-only tables", `INSERT INTO __genji_tables VALUES {a: 400, b: a * 4}`, true, ``, nil},
 	}
 
 	for _, test := range tests {
@@ -147,7 +150,7 @@ func TestInsertStmt(t *testing.T) {
 			INSERT INTO test
 			VALUES {
 				i: 10000000000, db: 21.21, b: true,
-				du: 127ns, bb: "blobValue", byt: "bytesValue",
+				du: 127ns, bb: "YmxvYlZhbHVlCg==", byt: "Ynl0ZXNWYWx1ZQ==",
 				t: "text", a: [1, "foo", true], d: {"foo": "bar"}
 			}`)
 		require.NoError(t, err)
@@ -164,7 +167,7 @@ func TestInsertStmt(t *testing.T) {
 			"db": 21.21,
 			"b": true,
 			"du": "127ns",
-			"bb": "YmxvYlZhbHVl",
+			"bb": "YmxvYlZhbHVlCg==",
 			"byt": "Ynl0ZXNWYWx1ZQ==",
 			"t": "text",
 			"a": [1, "foo", true],
@@ -177,43 +180,39 @@ func TestInsertStmt(t *testing.T) {
 			name            string
 			fieldConstraint string
 			value           string
-			expectedErr     string
 		}{
-			{"not null without type constraint", "NOT NULL", `{}`, `field "a" is required and must be not null`},
+			{"not null without type constraint", "NOT NULL", `{}`},
 
-			{"array", "ARRAY", `{a: "[1,2,3]"}`, `cannot convert "text" to "array"`},
-			{"array / not null with type constraint", "ARRAY NOT NULL", `{}`, `field "a" is required and must be not null`},
-			{"array / not null with non-respected type constraint ", "ARRAY NOT NULL", `{a: 42}`, `cannot convert "integer" to "array"`},
+			{"array / not null with type constraint", "ARRAY NOT NULL", `{}`},
+			{"array / not null with non-respected type constraint ", "ARRAY NOT NULL", `{a: 42}`},
 
-			{"blob", "BLOB", `{a: true}`, `cannot convert "bool" to "bytes"`},
-			{"blob / not null with type constraint", "BLOB NOT NULL", `{}`, `field "a" is required and must be not null`},
-			{"blob / not null with non-respected type constraint ", "BLOB NOT NULL", `{a: 42}`, `cannot convert "integer" to "bytes"`},
+			{"blob", "BLOB", `{a: true}`},
+			{"blob / not null with type constraint", "BLOB NOT NULL", `{}`},
+			{"blob / not null with non-respected type constraint ", "BLOB NOT NULL", `{a: 42}`},
 
-			{"bool / not null with type constraint", "BOOL NOT NULL", `{}`, `field "a" is required and must be not null`},
+			{"bool / not null with type constraint", "BOOL NOT NULL", `{}`},
 
-			{"bytes", "BYTES", `{a: [1,2,3]}`, `cannot convert "array" to "bytes"`},
-			{"bytes / not null with type constraint", "BYTES NOT NULL", `{}`, `field "a" is required and must be not null`},
-			{"bytes / not null with non-respected type constraint ", "BYTES NOT NULL", `{a: 42}`, `cannot convert "integer" to "bytes"`},
+			{"bytes", "BYTES", `{a: [1,2,3]}`},
+			{"bytes / not null with type constraint", "BYTES NOT NULL", `{}`},
+			{"bytes / not null with non-respected type constraint ", "BYTES NOT NULL", `{a: 42}`},
 
-			{"document", "DOCUMENT", `{a: "foo"}`, `cannot convert "text" to "document"`},
-			{"document / not null with type constraint", "DOCUMENT NOT NULL", `{}`, `field "a" is required and must be not null`},
-			{"document / not null with non-respected type constraint ", "DOCUMENT NOT NULL", `{a: false}`, `cannot convert "bool" to "document"`},
+			{"document", "DOCUMENT", `{"a": "foo"}`},
+			{"document / not null with type constraint", "DOCUMENT NOT NULL", `{}`},
+			{"document / not null with non-respected type constraint ", "DOCUMENT NOT NULL", `{a: false}`},
 
-			{"duration", "DURATION", `{a: "foo"}`, `cannot convert "foo" to "duration": time: invalid duration foo`},
-			{"duration / not null with type constraint", "DURATION NOT NULL", `{}`, `field "a" is required and must be not null`},
-			{"duration / not null with non-respected type constraint ", "DURATION NOT NULL", `{a: [1,2,3]}`, `type "array" incompatible with "integer"`},
+			{"duration", "DURATION", `{a: "foo"}`},
+			{"duration / not null with type constraint", "DURATION NOT NULL", `{}`},
+			{"duration / not null with non-respected type constraint ", "DURATION NOT NULL", `{a: [1,2,3]}`},
 
-			{"double", "DOUBLE", `{a: "foo"}`, `cannot convert "text" to "double"`},
-			{"double / not null with type constraint", "DOUBLE NOT NULL", `{}`, `field "a" is required and must be not null`},
-			{"double / not null with non-respected type constraint ", "DOUBLE NOT NULL", `{a: [1,2,3]}`, `cannot convert "array" to "double"`},
+			{"double", "DOUBLE", `{a: "foo"}`},
+			{"double / not null with type constraint", "DOUBLE NOT NULL", `{}`},
+			{"double / not null with non-respected type constraint ", "DOUBLE NOT NULL", `{a: [1,2,3]}`},
 
-			{"integer", "INTEGER", `{a: "foo"}`, `cannot convert "text" to "integer": type "text" incompatible with "integer"`},
-			{"integer / not null with type constraint", "INTEGER NOT NULL", `{}`, `field "a" is required and must be not null`},
-			{"integer / not null with non-respected type constraint ", "INTEGER NOT NULL", `{a: [1,2,3]}`, `cannot convert "array" to "integer": type "array" incompatible with "integer"`},
+			{"integer", "INTEGER", `{a: "foo"}`},
+			{"integer / not null with type constraint", "INTEGER NOT NULL", `{}`},
+			{"integer / not null with non-respected type constraint ", "INTEGER NOT NULL", `{a: [1,2,3]}`},
 
-			{"text", "TEXT", `{a: [1,2,3]}`, `cannot convert "array" to "string"`},
-			{"text / not null with type constraint", "TEXT NOT NULL", `{}`, `field "a" is required and must be not null`},
-			{"text / not null with non-respected type constraint ", "TEXT NOT NULL", `{a: 42}`, `cannot convert "integer" to "string"`},
+			{"text / not null with type constraint", "TEXT NOT NULL", `{}`},
 		}
 
 		db, err := genji.Open(":memory:")
@@ -228,7 +227,7 @@ func TestInsertStmt(t *testing.T) {
 
 				q = fmt.Sprintf("INSERT INTO test%d VALUES %s", i, test.value)
 				err = db.Exec(q)
-				require.EqualError(t, err, test.expectedErr)
+				require.Error(t, err)
 			})
 		}
 	})

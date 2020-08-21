@@ -1,12 +1,11 @@
 package document
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"math"
 	"time"
-
-	"github.com/genjidb/genji/pkg/bytesutil"
 )
 
 var (
@@ -39,26 +38,28 @@ type ValueType uint8
 const (
 	NullValue ValueType = 0x1
 
-	BoolValue = 0x5
+	BoolValue ValueType = 0x5
 
 	// integer family: 0x10 to 0x1F
-	IntegerValue = 0x10
+	IntegerValue ValueType = 0x10
 
 	// double family: 0x20 to 0x2F
-	DoubleValue = 0x20
+	DoubleValue ValueType = 0x20
 
 	// time family: 0x30 to 0x3F
-	DurationValue = 0x30
+	DurationValue ValueType = 0x30
 
 	// string family: 0x40 to 0x4F
-	BlobValue = 0x40
-	TextValue = 0x41
+	TextValue ValueType = 0x40
 
-	// array family: 0x40 to 0x5F
-	ArrayValue = 0x50
+	// blob family: 0x50 to 0x5F
+	BlobValue ValueType = 0x50
 
-	// document family: 0x60 to 0x6F
-	DocumentValue = 0x60
+	// array family: 0x60 to 0x6F
+	ArrayValue ValueType = 0x60
+
+	// document family: 0x70 to 0x7F
+	DocumentValue ValueType = 0x70
 )
 
 func (t ValueType) String() string {
@@ -88,17 +89,7 @@ func (t ValueType) String() string {
 
 // IsNumber returns true if t is either an integer of a float.
 func (t ValueType) IsNumber() bool {
-	return t.IsInteger() || t.IsFloat() || t == DurationValue
-}
-
-// IsInteger returns true if t is a signed or unsigned integer of any size.
-func (t ValueType) IsInteger() bool {
-	return t == IntegerValue || t == DurationValue
-}
-
-// IsFloat returns true if t is a Double.
-func (t ValueType) IsFloat() bool {
-	return t == DoubleValue
+	return t == IntegerValue || t == DoubleValue
 }
 
 // A Value stores encoded data alongside its type.
@@ -159,7 +150,7 @@ func NewBlobValue(x []byte) Value {
 func NewTextValue(x string) Value {
 	return Value{
 		Type: TextValue,
-		V:    []byte(x),
+		V:    x,
 	}
 }
 
@@ -216,210 +207,6 @@ func (v Value) IsTruthy() (bool, error) {
 	return !b, err
 }
 
-// ConvertTo decodes v to the selected type when possible.
-func (v Value) ConvertTo(t ValueType) (Value, error) {
-	if v.Type == t {
-		return v, nil
-	}
-
-	// Null values always remain null.
-	if v.Type == NullValue {
-		return v, nil
-	}
-
-	switch t {
-	case BoolValue:
-		x, err := v.ConvertToBool()
-		if err != nil {
-			return Value{}, err
-		}
-		return NewBoolValue(x), nil
-	case IntegerValue:
-		x, err := v.ConvertToInt64()
-		if err != nil {
-			return Value{}, fmt.Errorf(`cannot convert %q to "integer": %w`, v.Type, err)
-		}
-		return NewIntegerValue(x), nil
-	case DoubleValue:
-		x, err := v.ConvertToFloat64()
-		if err != nil {
-			return Value{}, err
-		}
-		return NewDoubleValue(x), nil
-	case DurationValue:
-		x, err := v.ConvertToDuration()
-		if err != nil {
-			return Value{}, err
-		}
-		return NewDurationValue(x), nil
-	case BlobValue:
-		x, err := v.ConvertToBytes()
-		if err != nil {
-			return Value{}, err
-		}
-		return NewBlobValue(x), nil
-	case TextValue:
-		x, err := v.ConvertToString()
-		if err != nil {
-			return Value{}, err
-		}
-		return NewTextValue(x), nil
-	}
-
-	return Value{}, fmt.Errorf("cannot convert %q to %q", v.Type, t)
-}
-
-// ConvertToBytes converts a value of type Text or Blob to a slice of bytes.
-// If fails if it's used with any other type.
-func (v Value) ConvertToBytes() ([]byte, error) {
-	switch v.Type {
-	case TextValue, BlobValue:
-		return v.V.([]byte), nil
-	}
-
-	if v.Type == NullValue {
-		return nil, nil
-	}
-
-	return nil, fmt.Errorf(`cannot convert %q to "bytes"`, v.Type)
-}
-
-// ConvertToString turns a value of type Text or Blob into a string.
-// If fails if it's used with any other type.
-func (v Value) ConvertToString() (string, error) {
-	switch v.Type {
-	case TextValue, BlobValue:
-		return string(v.V.([]byte)), nil
-	}
-
-	if v.Type == NullValue {
-		return "", nil
-	}
-
-	return "", fmt.Errorf(`cannot convert %q to "string"`, v.Type)
-}
-
-// ConvertToBool returns true if v is truthy, otherwise it returns false.
-func (v Value) ConvertToBool() (bool, error) {
-	if v.Type == BoolValue {
-		return v.V.(bool), nil
-	}
-
-	if v.Type == NullValue {
-		return false, nil
-	}
-
-	b, err := v.IsZeroValue()
-	return !b, err
-}
-
-// ConvertToInt64 turns any number into an int64.
-// It doesn't work with other types.
-func (v Value) ConvertToInt64() (int64, error) {
-	if v.Type == IntegerValue {
-		return v.V.(int64), nil
-	}
-
-	if v.Type == NullValue {
-		return 0, nil
-	}
-
-	if v.Type.IsNumber() {
-		return convertNumberToInt64(v)
-	}
-
-	if v.Type == BoolValue {
-		if v.V.(bool) {
-			return 1, nil
-		}
-
-		return 0, nil
-	}
-
-	return 0, fmt.Errorf(`type %q incompatible with "integer"`, v.Type)
-}
-
-// ConvertToFloat64 turns any number into a float64.
-// It doesn't work with other types.
-func (v Value) ConvertToFloat64() (float64, error) {
-	if v.Type == DoubleValue {
-		return v.V.(float64), nil
-	}
-
-	if v.Type == NullValue {
-		return 0, nil
-	}
-
-	if v.Type.IsInteger() {
-		x, err := convertNumberToInt64(v)
-		if err != nil {
-			return 0, err
-		}
-		return float64(x), nil
-	}
-
-	if v.Type == BoolValue {
-		if v.V.(bool) {
-			return 1, nil
-		}
-
-		return 0, nil
-	}
-
-	return 0, fmt.Errorf(`cannot convert %q to "double"`, v.Type)
-}
-
-// ConvertToDocument returns a document from the value.
-// It only works if the type of v is DocumentValue or NullValue.
-func (v Value) ConvertToDocument() (Document, error) {
-	if v.Type == NullValue {
-		return NewFieldBuffer(), nil
-	}
-
-	if v.Type != DocumentValue {
-		return nil, fmt.Errorf(`cannot convert %q to "document"`, v.Type)
-	}
-
-	return v.V.(Document), nil
-}
-
-// ConvertToArray returns an array from the value.
-// It only works if the type of v is ArrayValue or NullValue.
-func (v Value) ConvertToArray() (Array, error) {
-	if v.Type == NullValue {
-		return NewValueBuffer(), nil
-	}
-
-	if v.Type != ArrayValue {
-		return nil, fmt.Errorf(`cannot convert %q to "array"`, v.Type)
-	}
-
-	return v.V.(Array), nil
-}
-
-// ConvertToDuration turns any number into a time.Duration.
-// It doesn't work with other types.
-func (v Value) ConvertToDuration() (time.Duration, error) {
-	if v.Type == DurationValue {
-		return v.V.(time.Duration), nil
-	}
-
-	if v.Type == NullValue {
-		return 0, nil
-	}
-
-	if v.Type == TextValue {
-		d, err := time.ParseDuration(string(v.V.([]byte)))
-		if err != nil {
-			return 0, fmt.Errorf(`cannot convert %q to "duration": %v`, v.V, err)
-		}
-		return d, nil
-	}
-
-	x, err := v.ConvertToInt64()
-	return time.Duration(x), err
-}
-
 // IsZeroValue indicates if the value data is the zero value for the value type.
 // This function doesn't perform any allocation.
 func (v Value) IsZeroValue() (bool, error) {
@@ -432,8 +219,10 @@ func (v Value) IsZeroValue() (bool, error) {
 		return v.V == doubleZeroValue.V, nil
 	case DurationValue:
 		return v.V == durationZeroValue.V, nil
-	case BlobValue, TextValue:
-		return bytesutil.CompareBytes(v.V.([]byte), blobZeroValue.V.([]byte)) == 0, nil
+	case BlobValue:
+		return bytes.Compare(v.V.([]byte), blobZeroValue.V.([]byte)) == 0, nil
+	case TextValue:
+		return v.V == textZeroValue.V, nil
 	case ArrayValue:
 		// The zero value of an array is an empty array.
 		// Thus, if GetByIndex(0) returns the ErrValueNotFound
@@ -523,18 +312,8 @@ func calculateValues(a, b Value, operator byte) (res Value, err error) {
 		return NewNullValue(), nil
 	}
 
-	if a.Type == BoolValue {
-		a, err = a.ConvertTo(IntegerValue)
-		if err != nil {
-			return
-		}
-	}
-
-	if b.Type == BoolValue {
-		b, err = b.ConvertTo(IntegerValue)
-		if err != nil {
-			return
-		}
+	if a.Type == BoolValue || b.Type == BoolValue {
+		return NewNullValue(), nil
 	}
 
 	if a.Type == DurationValue && b.Type == DurationValue {
@@ -543,18 +322,20 @@ func calculateValues(a, b Value, operator byte) (res Value, err error) {
 			return
 		}
 		if operator != '&' && operator != '|' && operator != '^' {
-			return res.ConvertTo(DurationValue)
+			return NewDurationValue(time.Duration(res.V.(int64))), nil
 		}
 
 		return
 	}
 
-	if a.Type.IsFloat() || b.Type.IsFloat() {
-		return calculateFloats(a, b, operator)
-	}
+	if a.Type.IsNumber() && b.Type.IsNumber() {
+		if a.Type == DoubleValue || b.Type == DoubleValue {
+			return calculateFloats(a, b, operator)
+		}
 
-	if a.Type.IsInteger() || b.Type.IsInteger() {
-		return calculateIntegers(a, b, operator)
+		if a.Type == IntegerValue || b.Type == IntegerValue {
+			return calculateIntegers(a, b, operator)
+		}
 	}
 
 	return NewNullValue(), nil
@@ -585,15 +366,17 @@ func convertNumberToInt64(v Value) (int64, error) {
 func calculateIntegers(a, b Value, operator byte) (res Value, err error) {
 	var xa, xb int64
 
-	xa, err = a.ConvertToInt64()
+	ia, err := a.CastAsInteger()
 	if err != nil {
 		return NewNullValue(), nil
 	}
+	xa = ia.V.(int64)
 
-	xb, err = b.ConvertToInt64()
+	ib, err := b.CastAsInteger()
 	if err != nil {
 		return NewNullValue(), nil
 	}
+	xb = ib.V.(int64)
 
 	var xr int64
 
@@ -650,15 +433,17 @@ func calculateIntegers(a, b Value, operator byte) (res Value, err error) {
 func calculateFloats(a, b Value, operator byte) (res Value, err error) {
 	var xa, xb float64
 
-	xa, err = a.ConvertToFloat64()
+	fa, err := a.CastAsDouble()
 	if err != nil {
 		return NewNullValue(), nil
 	}
+	xa = fa.V.(float64)
 
-	xb, err = b.ConvertToFloat64()
+	fb, err := b.CastAsDouble()
 	if err != nil {
 		return NewNullValue(), nil
 	}
+	xb = fb.V.(float64)
 
 	switch operator {
 	case '+':

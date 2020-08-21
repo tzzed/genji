@@ -57,6 +57,8 @@ func (p *Parser) ParseQuery() (query.Query, error) {
 func (p *Parser) ParseStatement() (query.Statement, error) {
 	tok, pos, lit := p.ScanIgnoreWhitespace()
 	switch tok {
+	case scanner.ALTER:
+		return p.parseAlterStatement()
 	case scanner.SELECT:
 		return p.parseSelectStatement()
 	case scanner.DELETE:
@@ -71,6 +73,8 @@ func (p *Parser) ParseStatement() (query.Statement, error) {
 		return p.parseDropStatement()
 	case scanner.EXPLAIN:
 		return p.parseExplainStatement()
+	case scanner.REINDEX:
+		return p.parseReIndexStatement()
 	}
 
 	return nil, newParseError(scanner.Tokstr(tok, lit), []string{

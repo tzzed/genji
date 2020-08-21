@@ -73,6 +73,7 @@ const (
 
 	keywordBeg
 	// ALL and the following are Genji SQL Keywords
+	ALTER
 	AS
 	ASC
 	BY
@@ -95,6 +96,8 @@ const (
 	ON
 	ORDER
 	PRIMARY
+	REINDEX
+	RENAME
 	SELECT
 	SET
 	TABLE
@@ -170,6 +173,7 @@ var tokens = [...]string{
 	SEMICOLON:   ";",
 	DOT:         ".",
 
+	ALTER:   "ALTER",
 	AS:      "AS",
 	ASC:     "ASC",
 	BY:      "BY",
@@ -192,6 +196,8 @@ var tokens = [...]string{
 	ON:      "ON",
 	ORDER:   "ORDER",
 	PRIMARY: "PRIMARY",
+	REINDEX: "REINDEX",
+	RENAME:  "RENAME",
 	SELECT:  "SELECT",
 	SET:     "SET",
 	TABLE:   "TABLE",

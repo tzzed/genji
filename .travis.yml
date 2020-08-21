@@ -4,8 +4,8 @@ env:
   - GO111MODULE=on
 
 go:
-  - '1.13.x'
-  - '1.14.x'
+  - "1.14.x"
+  - "1.15.x"
   - tip
 
 matrix:
@@ -16,5 +16,5 @@ script:
   - go mod vendor
   - make
   - make gen
-  - go test -v -mod vendor -race -cover -timeout=2m ./...
-  - go test -v -mod vendor -race -cover -timeout=2m -tags=tinygo ./...
+  - go test -mod vendor -race -cover -timeout=2m ./...
+  - go test -mod vendor -race -cover -timeout=2m -tags=tinygo ./...

@@ -3,6 +3,7 @@ package database
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/genjidb/genji/document"
 	"github.com/genjidb/genji/document/encoding/msgpack"
@@ -11,8 +12,9 @@ import (
 )
 
 var (
-	tableInfoStoreName = "__genji.tables"
-	indexStoreName     = "__genji.indexes"
+	internalPrefix     = "__genji_"
+	tableInfoStoreName = internalPrefix + "tables"
+	indexStoreName     = internalPrefix + "indexes"
 )
 
 // Transaction represents a database transaction. It provides methods for managing the
@@ -20,6 +22,7 @@ var (
 // Transaction is either read-only or read/write. Read-only can be used to read tables
 // and read/write can be used to read, create, delete and modify tables.
 type Transaction struct {
+	id       int64
 	db       *Database
 	Tx       engine.Transaction
 	writable bool
@@ -30,11 +33,17 @@ type Transaction struct {
 
 // Rollback the transaction. Can be used safely after commit.
 func (tx *Transaction) Rollback() error {
+	if tx.writable {
+		tx.tableInfoStore.rollback(tx)
+	}
 	return tx.Tx.Rollback()
 }
 
 // Commit the transaction.
 func (tx *Transaction) Commit() error {
+	if tx.writable {
+		tx.tableInfoStore.commit(tx)
+	}
 	return tx.Tx.Commit()
 }
 
@@ -43,39 +52,25 @@ func (tx *Transaction) Writable() bool {
 	return tx.writable
 }
 
-// Promote rollsback a read-only transaction and begins a read-write transaction transparently.
-// It returns an error if the current transaction is already writable.
-func (tx *Transaction) Promote() error {
-	if tx.writable {
-		return errors.New("cannot promote a writable transaction")
-	}
-
-	err := tx.Rollback()
-	if err != nil {
-		return err
-	}
-
-	newTransaction, err := tx.db.Begin(true)
-	if err != nil {
-		return err
-	}
-
-	*tx = *newTransaction
-	return nil
-}
-
 // CreateTable creates a table with the given name.
 // If it already exists, returns ErrTableAlreadyExists.
-func (tx Transaction) CreateTable(name string, info *TableInfo) error {
+func (tx *Transaction) CreateTable(name string, info *TableInfo) error {
+	if strings.HasPrefix(name, internalPrefix) {
+		return fmt.Errorf("table name must not start with %s", internalPrefix)
+	}
+
 	if info == nil {
 		info = new(TableInfo)
 	}
-	sid, err := tx.tableInfoStore.Insert(name, info)
+
+	info.tableName = name
+	info.storeID = tx.tableInfoStore.generateStoreID()
+	err := tx.tableInfoStore.Insert(tx, name, info)
 	if err != nil {
 		return err
 	}
 
-	err = tx.Tx.CreateStore(sid)
+	err = tx.Tx.CreateStore(info.storeID)
 	if err != nil {
 		return fmt.Errorf("failed to create table %q: %w", name, err)
 	}
@@ -84,31 +79,77 @@ func (tx Transaction) CreateTable(name string, info *TableInfo) error {
 }
 
 // GetTable returns a table by name. The table instance is only valid for the lifetime of the transaction.
-func (tx Transaction) GetTable(name string) (*Table, error) {
-	ti, err := tx.tableInfoStore.Get(name)
+func (tx *Transaction) GetTable(name string) (*Table, error) {
+	ti, err := tx.tableInfoStore.Get(tx, name)
 	if err != nil {
 		return nil, err
 	}
 
-	s, err := tx.Tx.GetStore(ti.storeID[:])
+	s, err := tx.Tx.GetStore(ti.storeID)
 	if err != nil {
 		return nil, err
 	}
 
 	return &Table{
-		tx:        &tx,
+		tx:        tx,
 		Store:     s,
 		name:      name,
 		infoStore: tx.tableInfoStore,
 	}, nil
 }
 
+// RenameTable renames a table.
+// If it doesn't exist, it returns ErrTableNotFound.
+func (tx *Transaction) RenameTable(oldName, newName string) error {
+	ti, err := tx.tableInfoStore.Get(tx, oldName)
+	if err != nil {
+		return err
+	}
+
+	if ti.readOnly {
+		return errors.New("cannot write to read-only table")
+	}
+
+	ti.tableName = newName
+	// Insert the TableInfo keyed by the newName name.
+	err = tx.tableInfoStore.Insert(tx, newName, ti)
+	if err != nil {
+		return err
+	}
+
+	// Update the indexes.
+	idxs, err := tx.ListIndexes()
+	if err != nil {
+		return err
+	}
+	for _, idx := range idxs {
+		if idx.TableName == oldName {
+			idx.TableName = newName
+			err = tx.indexStore.Replace(idx.IndexName, *idx)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	// Delete the old reference from the tableInfoStore.
+	return tx.tableInfoStore.Delete(tx, oldName)
+}
+
 // DropTable deletes a table from the database.
-func (tx Transaction) DropTable(name string) error {
+func (tx *Transaction) DropTable(name string) error {
+	ti, err := tx.tableInfoStore.Get(tx, name)
+	if err != nil {
+		return err
+	}
+
+	if ti.readOnly {
+		return errors.New("cannot write to read-only table")
+	}
+
 	it := tx.indexStore.st.NewIterator(engine.IteratorConfig{})
 
 	var buf msgpack.EncodedDocument
-	var err error
 	for it.Seek(nil); it.Valid(); it.Next() {
 		item := it.Item()
 		var opts IndexConfig
@@ -140,28 +181,17 @@ func (tx Transaction) DropTable(name string) error {
 		return err
 	}
 
-	ti, err := tx.tableInfoStore.Get(name)
+	err = tx.tableInfoStore.Delete(tx, name)
 	if err != nil {
 		return err
 	}
 
-	err = tx.tableInfoStore.Delete(name)
-	if err != nil {
-		return err
-	}
-
-	return tx.Tx.DropStore(ti.storeID[:])
-}
-
-// ListTables lists all the tables.
-// The returned slice is lexicographically ordered.
-func (tx Transaction) ListTables() ([]string, error) {
-	return tx.tableInfoStore.ListTables()
+	return tx.Tx.DropStore(ti.storeID)
 }
 
 // CreateIndex creates an index with the given name.
-// If it already exists, returns ErrTableAlreadyExists.
-func (tx Transaction) CreateIndex(opts IndexConfig) error {
+// If it already exists, returns ErrIndexAlreadyExists.
+func (tx *Transaction) CreateIndex(opts IndexConfig) error {
 	_, err := tx.GetTable(opts.TableName)
 	if err != nil {
 		return err
@@ -171,7 +201,7 @@ func (tx Transaction) CreateIndex(opts IndexConfig) error {
 }
 
 // GetIndex returns an index by name.
-func (tx Transaction) GetIndex(name string) (*Index, error) {
+func (tx *Transaction) GetIndex(name string) (*Index, error) {
 	opts, err := tx.indexStore.Get(name)
 	if err != nil {
 		return nil, err
@@ -185,16 +215,13 @@ func (tx Transaction) GetIndex(name string) (*Index, error) {
 	}
 
 	return &Index{
-		Index:     idx,
-		IndexName: opts.IndexName,
-		TableName: opts.TableName,
-		Path:      opts.Path,
-		Unique:    opts.Unique,
+		Index: idx,
+		Opts:  *opts,
 	}, nil
 }
 
 // DropIndex deletes an index from the database.
-func (tx Transaction) DropIndex(name string) error {
+func (tx *Transaction) DropIndex(name string) error {
 	opts, err := tx.indexStore.Get(name)
 	if err != nil {
 		return err
@@ -215,18 +242,18 @@ func (tx Transaction) DropIndex(name string) error {
 }
 
 // ListIndexes lists all indexes.
-func (tx Transaction) ListIndexes() ([]*IndexConfig, error) {
+func (tx *Transaction) ListIndexes() ([]*IndexConfig, error) {
 	return tx.indexStore.ListAll()
 }
 
 // ReIndex truncates and recreates selected index from scratch.
-func (tx Transaction) ReIndex(indexName string) error {
+func (tx *Transaction) ReIndex(indexName string) error {
 	idx, err := tx.GetIndex(indexName)
 	if err != nil {
 		return err
 	}
 
-	tb, err := tx.GetTable(idx.TableName)
+	tb, err := tx.GetTable(idx.Opts.TableName)
 	if err != nil {
 		return err
 	}
@@ -237,7 +264,7 @@ func (tx Transaction) ReIndex(indexName string) error {
 	}
 
 	return tb.Iterate(func(d document.Document) error {
-		v, err := idx.Path.GetValue(d)
+		v, err := idx.Opts.Path.GetValue(d)
 		if err != nil {
 			return err
 		}
@@ -247,7 +274,7 @@ func (tx Transaction) ReIndex(indexName string) error {
 }
 
 // ReIndexAll truncates and recreates all indexes of the database from scratch.
-func (tx Transaction) ReIndexAll() error {
+func (tx *Transaction) ReIndexAll() error {
 	var indexes []string
 
 	it := tx.indexStore.st.NewIterator(engine.IteratorConfig{})
@@ -267,16 +294,6 @@ func (tx Transaction) ReIndexAll() error {
 	}
 
 	return nil
-}
-
-func (tx *Transaction) getTableInfoStore() (*tableInfoStore, error) {
-	st, err := tx.Tx.GetStore([]byte(tableInfoStoreName))
-	if err != nil {
-		return nil, err
-	}
-	return &tableInfoStore{
-		st: st,
-	}, nil
 }
 
 func (tx *Transaction) getIndexStore() (*indexStore, error) {

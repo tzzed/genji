@@ -1,9 +1,11 @@
 package database
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/genjidb/genji/document"
@@ -11,6 +13,8 @@ import (
 	"github.com/genjidb/genji/engine"
 	"github.com/genjidb/genji/index"
 )
+
+const storePrefix = 't'
 
 // FieldConstraint describes constraints on a particular field.
 type FieldConstraint struct {
@@ -46,34 +50,31 @@ func (f *FieldConstraint) ScanDocument(d document.Document) error {
 	if err != nil {
 		return err
 	}
-	tp, err := v.ConvertToInt64()
-	if err != nil {
-		return err
-	}
+	tp := v.V.(int64)
 	f.Type = document.ValueType(tp)
 
 	v, err = d.GetByField("is_primary_key")
 	if err != nil {
 		return err
 	}
-	f.IsPrimaryKey, err = v.ConvertToBool()
-	if err != nil {
-		return err
-	}
+	f.IsPrimaryKey = v.V.(bool)
 
 	v, err = d.GetByField("is_not_null")
 	if err != nil {
 		return err
 	}
-	f.IsNotNull, err = v.ConvertToBool()
-	return err
+	f.IsNotNull = v.V.(bool)
+	return nil
 }
 
 type TableInfo struct {
-	// storeID is a generated ID that acts as a key to reference a table.
-	// The first-4 bytes represents the timestamp in second and the last-2 bytes are
-	// randomly generated.
-	storeID [6]byte
+	tableName string
+	// storeID is used as a key to reference a table.
+	storeID  []byte
+	readOnly bool
+	// if non-zero, this tableInfo has been created during the current transaction.
+	// it will be removed if the transaction is rolled back or set to false if its commited.
+	transactionID int64
 
 	FieldConstraints []FieldConstraint
 }
@@ -93,7 +94,8 @@ func (ti *TableInfo) GetPrimaryKey() *FieldConstraint {
 func (ti *TableInfo) ToDocument() document.Document {
 	buf := document.NewFieldBuffer()
 
-	buf.Add("storeID", document.NewBlobValue(ti.storeID[:]))
+	buf.Add("table_name", document.NewTextValue(ti.tableName))
+	buf.Add("store_id", document.NewBlobValue(ti.storeID))
 
 	vbuf := document.NewValueBuffer()
 	for _, fc := range ti.FieldConstraints {
@@ -102,28 +104,29 @@ func (ti *TableInfo) ToDocument() document.Document {
 
 	buf.Add("field_constraints", document.NewArrayValue(vbuf))
 
+	buf.Add("read_only", document.NewBoolValue(ti.readOnly))
 	return buf
 }
 
 func (ti *TableInfo) ScanDocument(d document.Document) error {
-	v, err := d.GetByField("storeID")
+	v, err := d.GetByField("table_name")
 	if err != nil {
 		return err
 	}
-	b, err := v.ConvertToBytes()
+	ti.tableName = v.V.(string)
+
+	v, err = d.GetByField("store_id")
 	if err != nil {
 		return err
 	}
-	copy(ti.storeID[:], b)
+	ti.storeID = make([]byte, len(v.V.([]byte)))
+	copy(ti.storeID, v.V.([]byte))
 
 	v, err = d.GetByField("field_constraints")
 	if err != nil {
 		return err
 	}
-	ar, err := v.ConvertToArray()
-	if err != nil {
-		return err
-	}
+	ar := v.V.(document.Array)
 
 	l, err := document.ArrayLength(ar)
 	if err != nil {
@@ -132,117 +135,244 @@ func (ti *TableInfo) ScanDocument(d document.Document) error {
 
 	ti.FieldConstraints = make([]FieldConstraint, l)
 
-	return ar.Iterate(func(i int, value document.Value) error {
-		doc, err := value.ConvertToDocument()
-		if err != nil {
-			return err
-		}
-		return ti.FieldConstraints[i].ScanDocument(doc)
+	err = ar.Iterate(func(i int, value document.Value) error {
+		return ti.FieldConstraints[i].ScanDocument(value.V.(document.Document))
 	})
+	if err != nil {
+		return err
+	}
+
+	v, err = d.GetByField("read_only")
+	if err != nil {
+		return err
+	}
+
+	ti.readOnly = v.V.(bool)
+	return nil
 }
 
+// tableInfoStore manages table information.
+// It loads table information during database startup
+// and holds it in memory.
 type tableInfoStore struct {
-	st engine.Store
+	// tableInfos contains information about all the tables
+	tableInfos map[string]TableInfo
+
+	mu sync.RWMutex
+}
+
+func newTableInfoStore(tx engine.Transaction) (*tableInfoStore, error) {
+	var ts tableInfoStore
+
+	err := ts.loadAllTableInfo(tx)
+	if err != nil {
+		return nil, err
+	}
+
+	return &ts, nil
 }
 
 // Insert a new tableInfo for the given table name.
-// It automatically generates a unique storeID for that table.
-func (t *tableInfoStore) Insert(tableName string, info *TableInfo) ([]byte, error) {
-	key := []byte(tableName)
-	_, err := t.st.Get(key)
-	if err == nil {
-		return nil, ErrTableAlreadyExists
-	}
-	if err != engine.ErrKeyNotFound {
-		return nil, err
-	}
+func (t *tableInfoStore) Insert(tx *Transaction, tableName string, info *TableInfo) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 
-	var id [6]byte
-	for {
-		id = generateStoreID()
-		_, err = t.st.Get(id[:])
-		if err == nil {
-			// A store with this id already exists.
-			// Let's generate a new one.
-			continue
-		}
-		if err != engine.ErrKeyNotFound {
-			return nil, err
-		}
-		break
+	_, ok := t.tableInfos[tableName]
+	if ok {
+		// TODO(asdine): if a table already exists but is uncommited,
+		// there is a chance the other transaction will be rolled back.
+		// Instead of returning an error, wait until the other transaction is
+		// either commited or rolled back.
+		// If it is commited, return an error here
+		// If not, create the table in this transaction.
+		return ErrTableAlreadyExists
 	}
-	info.storeID = id
 
 	v, err := msgpack.EncodeDocument(info.ToDocument())
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	err = t.st.Put(key, v)
+	st, err := tx.Tx.GetStore([]byte(tableInfoStoreName))
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return info.storeID[:], err
+
+	err = st.Put([]byte(tableName), v)
+	if err != nil {
+		return err
+	}
+
+	info.transactionID = tx.id
+	t.tableInfos[tableName] = *info
+	return nil
 }
 
-func (t *tableInfoStore) Get(tableName string) (*TableInfo, error) {
-	key := []byte(tableName)
-	v, err := t.st.Get(key)
-	if err == engine.ErrKeyNotFound {
+func (t *tableInfoStore) Get(tx *Transaction, tableName string) (*TableInfo, error) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	info, ok := t.tableInfos[tableName]
+	if !ok {
 		return nil, ErrTableNotFound
 	}
-	if err != nil {
-		return nil, err
+
+	if info.transactionID != 0 && info.transactionID != tx.id {
+		return nil, ErrTableNotFound
 	}
 
-	var ti TableInfo
-	err = ti.ScanDocument(msgpack.EncodedDocument(v))
-	if err != nil {
-		return nil, err
-	}
-
-	return &ti, nil
+	return &info, nil
 }
 
-func (t *tableInfoStore) Delete(tableName string) error {
+func (t *tableInfoStore) Delete(tx *Transaction, tableName string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	info, ok := t.tableInfos[tableName]
+	if !ok {
+		return ErrTableNotFound
+	}
+
+	if info.transactionID != 0 && info.transactionID != tx.id {
+		return ErrTableNotFound
+	}
+
+	st, err := tx.Tx.GetStore([]byte(tableInfoStoreName))
+	if err != nil {
+		return err
+	}
+
 	key := []byte(tableName)
-	err := t.st.Delete(key)
+	err = st.Delete(key)
 	if err == engine.ErrKeyNotFound {
 		return ErrTableNotFound
 	}
-	return err
+	if err != nil {
+		return err
+	}
+
+	delete(t.tableInfos, tableName)
+
+	return nil
 }
 
-func (t *tableInfoStore) ListTables() ([]string, error) {
-	it := t.st.NewIterator(engine.IteratorConfig{})
+func (t *tableInfoStore) loadAllTableInfo(tx engine.Transaction) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 
-	var names []string
+	st, err := tx.GetStore([]byte(tableInfoStoreName))
+	if err != nil {
+		return err
+	}
+
+	it := st.NewIterator(engine.IteratorConfig{})
+	defer it.Close()
+
+	t.tableInfos = make(map[string]TableInfo)
+	var b []byte
 	for it.Seek(nil); it.Valid(); it.Next() {
-		k := it.Item().Key()
-		names = append(names, string(k))
+		itm := it.Item()
+		b, err = itm.ValueCopy(b)
+		if err != nil {
+			return err
+		}
+
+		var ti TableInfo
+		err = ti.ScanDocument(msgpack.EncodedDocument(b))
+		if err != nil {
+			return err
+		}
+
+		t.tableInfos[string(itm.Key())] = ti
 	}
-	return names, it.Close()
+
+	t.tableInfos[tableInfoStoreName] = TableInfo{
+		storeID:  []byte(tableInfoStoreName),
+		readOnly: true,
+	}
+	return nil
 }
 
-func generateStoreID() [6]byte {
-	var id [6]byte
+// remove all tableInfo whose transaction id is equal to the given transacrion id.
+// this is called when a read/write transaction is being rolled back.
+func (t *tableInfoStore) rollback(tx *Transaction) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 
-	binary.BigEndian.PutUint32(id[:], uint32(time.Now().Unix()))
-	if _, err := rand.Reader.Read(id[4:]); err != nil {
-		panic(fmt.Errorf("cannot generate random number: %v;", err))
+	for k, info := range t.tableInfos {
+		if info.transactionID == tx.id {
+			delete(t.tableInfos, k)
+		}
+	}
+}
+
+// set all the tableInfo created by this transaction to 0.
+// this is called when a read/write transaction is being commited.
+func (t *tableInfoStore) commit(tx *Transaction) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	for k := range t.tableInfos {
+		if t.tableInfos[k].transactionID == tx.id {
+			info := t.tableInfos[k]
+			info.transactionID = 0
+			t.tableInfos[k] = info
+		}
+	}
+}
+
+// GetTableInfo returns a copy of all the table information.
+func (t *tableInfoStore) GetTableInfo() map[string]TableInfo {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	ti := make(map[string]TableInfo, len(t.tableInfos))
+	for k, v := range t.tableInfos {
+		ti[k] = v
 	}
 
-	return id
+	return ti
+}
+
+// generateStoreID generates an ID used as a key to reference a table.
+// The first byte contains the prefix used for table stores.
+// The next 4 bytes represent the timestamp in second and the last 2 bytes are
+// randomly generated.
+func (t *tableInfoStore) generateStoreID() []byte {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	var found bool = true
+	var id [7]byte
+	for found {
+		id[0] = storePrefix
+		binary.BigEndian.PutUint32(id[1:], uint32(time.Now().Unix()))
+		if _, err := rand.Reader.Read(id[5:]); err != nil {
+			panic(fmt.Errorf("cannot generate random number: %v;", err))
+		}
+
+		found = false
+		for _, ti := range t.tableInfos {
+			if bytes.Equal(ti.storeID, id[:]) {
+				// A store with this id already exists.
+				// Let's generate a new one.
+				found = true
+				break
+			}
+		}
+	}
+
+	return id[:]
 }
 
 // IndexConfig holds the configuration of an index.
 type IndexConfig struct {
+	TableName string
+	IndexName string
+	Path      document.ValuePath
+
 	// If set to true, values will be associated with at most one key. False by default.
 	Unique bool
-
-	IndexName string
-	TableName string
-	Path      document.ValuePath
 }
 
 // ToDocument creates a document from an IndexConfig.
@@ -262,28 +392,19 @@ func (i *IndexConfig) ScanDocument(d document.Document) error {
 	if err != nil {
 		return err
 	}
-	i.Unique, err = v.ConvertToBool()
-	if err != nil {
-		return err
-	}
+	i.Unique = v.V.(bool)
 
 	v, err = d.GetByField("indexname")
 	if err != nil {
 		return err
 	}
-	i.IndexName, err = v.ConvertToString()
-	if err != nil {
-		return err
-	}
+	i.IndexName = string(v.V.(string))
 
 	v, err = d.GetByField("tablename")
 	if err != nil {
 		return err
 	}
-	i.TableName, err = v.ConvertToString()
-	if err != nil {
-		return err
-	}
+	i.TableName = string(v.V.(string))
 
 	v, err = d.GetByField("path")
 	if err != nil {
@@ -297,11 +418,7 @@ func (i *IndexConfig) ScanDocument(d document.Document) error {
 // the index configuration and provides methods to manipulate the index.
 type Index struct {
 	index.Index
-
-	IndexName string
-	TableName string
-	Path      document.ValuePath
-	Unique    bool
+	Opts IndexConfig
 }
 
 type indexStore struct {
@@ -345,6 +462,15 @@ func (t *indexStore) Get(indexName string) (*IndexConfig, error) {
 	return &idxopts, nil
 }
 
+func (t *indexStore) Replace(indexName string, cfg IndexConfig) error {
+	v, err := msgpack.EncodeDocument(cfg.ToDocument())
+	if err != nil {
+		return err
+	}
+
+	return t.st.Put([]byte(indexName), v)
+}
+
 func (t *indexStore) Delete(indexName string) error {
 	key := []byte(indexName)
 	err := t.st.Delete(key)
@@ -386,20 +512,10 @@ func (t *indexStore) ListAll() ([]*IndexConfig, error) {
 }
 
 func arrayToValuePath(v document.Value) (document.ValuePath, error) {
-	ar, err := v.ConvertToArray()
-	if err != nil {
-		return nil, err
-	}
-
 	var path document.ValuePath
 
-	err = ar.Iterate(func(_ int, value document.Value) error {
-		p, err := value.ConvertToString()
-		if err != nil {
-			return err
-		}
-
-		path = append(path, p)
+	err := v.V.(document.Array).Iterate(func(_ int, value document.Value) error {
+		path = append(path, value.V.(string))
 		return nil
 	})
 
