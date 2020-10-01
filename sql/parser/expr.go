@@ -202,14 +202,8 @@ func (p *Parser) parseUnaryExpr() (expr.Expr, error) {
 		p.Unscan()
 		return p.parseExprList(scanner.LSBRACKET, scanner.RSBRACKET)
 	case scanner.LPAREN:
-		e, _, err := p.ParseExpr()
-		if err != nil {
-			return nil, err
-		}
-		if tok, pos, lit := p.ScanIgnoreWhitespace(); tok != scanner.RPAREN {
-			return nil, newParseError(scanner.Tokstr(tok, lit), []string{")"}, pos)
-		}
-		return expr.Parentheses{E: e}, nil
+		p.Unscan()
+		return p.parseExprList(scanner.LPAREN, scanner.RPAREN)
 	default:
 		return nil, newParseError(scanner.Tokstr(tok, lit), []string{"identifier", "string", "number", "bool"}, pos)
 	}

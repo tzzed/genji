@@ -56,6 +56,13 @@ func TestComparisonINExpr(t *testing.T) {
 		{"[1, 2] IN 1", document.NewBoolValue(false), false},
 		{"1 IN NULL", nullLitteral, false},
 		{"NULL IN [1, 2, NULL]", nullLitteral, false},
+		{"1 IN ()", document.NewBoolValue(false), false},
+		{"1 IN (1, 2, 3)", document.NewBoolValue(true), false},
+		{"2 IN (2.1, 2.2, 2.0)", document.NewBoolValue(true), false},
+		{"1 IN (2, 3)", document.NewBoolValue(false), false},
+		{"(1) IN (1, 2, 3)", document.NewBoolValue(false), false},
+		{"(1) IN ([1], [2], (3))", document.NewBoolValue(true), false},
+		{"(1) IN ((1), (2), (3))", document.NewBoolValue(true), false},
 	}
 
 	for _, test := range tests {

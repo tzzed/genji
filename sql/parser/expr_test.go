@@ -82,7 +82,7 @@ func TestParserExpr(t *testing.T) {
 		{"bad document: missing colon", `{a: 1, 'b'}`, nil, true},
 
 		// parentheses
-		{"parentheses: empty", "()", nil, true},
+		{"parentheses: empty", "()", expr.LiteralExprList(nil), false},
 		{"parentheses: values", `(1)`,
 			expr.Parentheses{
 				E: expr.IntegerValue(1),
