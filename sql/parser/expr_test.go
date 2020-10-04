@@ -84,17 +84,17 @@ func TestParserExpr(t *testing.T) {
 		// parentheses
 		{"parentheses: empty", "()", expr.LiteralExprList(nil), false},
 		{"parentheses: values", `(1)`,
-			expr.Parentheses{
-				E: expr.IntegerValue(1),
+			expr.LiteralExprList{
+				expr.IntegerValue(1),
 			}, false},
 		{"parentheses: expr", `(1 + true * (4 + 3))`,
-			expr.Parentheses{
-				E: expr.Add(
+			expr.LiteralExprList{
+				expr.Add(
 					expr.IntegerValue(1),
 					expr.Mul(
 						expr.BoolValue(true),
-						expr.Parentheses{
-							E: expr.Add(
+						expr.LiteralExprList{
+							 expr.Add(
 								expr.IntegerValue(4),
 								expr.IntegerValue(3),
 							),
@@ -109,7 +109,7 @@ func TestParserExpr(t *testing.T) {
 				expr.BoolValue(true),
 				expr.KVPairs{expr.KVPair{K: "a", V: expr.IntegerValue(1)}},
 				expr.FieldSelector(parsePath(t, "a.b.c")),
-				expr.Parentheses{E: expr.IntegerValue(-1)},
+				expr.LiteralExprList{ expr.IntegerValue(-1)},
 				expr.LiteralExprList{expr.IntegerValue(-1)},
 			}, false},
 		{"list with brackets: missing bracket", `[1, true, {a: 1}, a.b.c, (-1), [-1]`, nil, true},
