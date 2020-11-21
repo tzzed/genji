@@ -97,11 +97,11 @@ func TestRunDumpCmd(t *testing.T) {
 		fieldConstraint string
 		want            string
 		fails           bool
-		params          []interface{}
 	}{
-		{"Values / With columns", `INSERT INTO test (a, b, c) VALUES ('a', 'b', 'c')`, ``, `INSERT INTO test VALUES {"a": "a", "b": "b", "c": "c"};`, false, nil},
-		{"text / not null with type constraint", `INSERT INTO test (a, b, c) VALUES ('a', 'b', 'c')`, `TEXT NOT NULL`, `INSERT INTO test VALUES {"a": "a", "b": "b", "c": "c"};`, false, nil},
-		{"text / pk and not null with type constraint", `INSERT INTO test (a, b, c) VALUES ('a', 'b', 'c')`, `TEXT PRIMARY KEY NOT NULL`, `INSERT INTO test VALUES {"a": "a", "b": "b", "c": "c"};`, false, nil},
+		{"Values / With columns", `INSERT INTO test (a, b, c) VALUES ('a', 'b', 'c')`, ``, `INSERT INTO test VALUES {"a": "a", "b": "b", "c": "c"};`, false},
+		{"text / not null with type constraint", `INSERT INTO test (a, b, c) VALUES ('a', 'b', 'c')`, `TEXT NOT NULL`, `INSERT INTO test VALUES {"a": "a", "b": "b", "c": "c"};`, false},
+		{"text / pk and not null with type constraint", `INSERT INTO test (a, b, c) VALUES ('a', 'b', 'c')`, `TEXT PRIMARY KEY NOT NULL`, `INSERT INTO test VALUES {"a": "a", "b": "b", "c": "c"};`, false},
+		{"text / not null default type constraint", ``, `INTEGER NOT NULL DEFAULT 10`, ``, false},
 	}
 
 	for _, tt := range tests {
@@ -113,11 +113,9 @@ func TestRunDumpCmd(t *testing.T) {
 
 				var bwant bytes.Buffer
 
-				tx := "BEGIN TRANSACTION;\n"
-				bwant.WriteString(tx)
-				ci := "COMMIT;\n"
+				bwant.WriteString("BEGIN TRANSACTION;\n")
 				if withConstraints {
-					q := fmt.Sprintf("CREATE TABLE test (\n  a %s\n);\n", tt.fieldConstraint)
+					q := fmt.Sprintf("CREATE TABLE test (\n a %s\n);\n", tt.fieldConstraint)
 					err := db.Exec(q)
 					require.NoError(t, err)
 					bwant.WriteString(q)
@@ -144,26 +142,30 @@ func TestRunDumpCmd(t *testing.T) {
 								index.Path)
 							bwant.WriteString(info)
 						}
+
 						return nil
 					})
 					require.NoError(t, err)
-
 				}
-				err = db.Exec(tt.query, tt.params...)
+
+				err = db.Exec(tt.query)
 				if tt.fails {
 					require.Error(t, err)
 					return
 				}
 				require.NoError(t, err)
-				tt.want = fmt.Sprintf("%s\n", strings.TrimSpace(tt.want))
-				bwant.WriteString(tt.want)
+
+				if tt.want != "" {
+					tt.want = fmt.Sprintf("%s\n", strings.TrimSpace(tt.want))
+					bwant.WriteString(tt.want)
+				}
+				bwant.WriteString("COMMIT;\n")
 
 				var buf bytes.Buffer
 				err = RunDumpCmd(db, []string{`test`}, &buf)
 				require.NoError(t, err)
-				bwant.WriteString(ci)
-				require.Equal(t, bwant.String(), buf.String())
 
+				require.Equal(t, bwant.String(), buf.String())
 			}
 		}
 

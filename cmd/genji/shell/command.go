@@ -242,6 +242,11 @@ func dumpTable(tx *genji.Tx, tableName string, w io.Writer) error {
 		if fc.IsNotNull {
 			buf.WriteString(" NOT NULL")
 		}
+
+		if fc.DefaultValue.V != nil {
+			v := fmt.Sprintf(" DEFAULT %v", fc.DefaultValue.V)
+			buf.WriteString(v)
+		}
 	}
 
 	// Fields constraints close parenthesis.
