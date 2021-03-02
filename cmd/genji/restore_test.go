@@ -25,8 +25,7 @@ func TestExecuteRestore(t *testing.T) {
 		{"without engine", "", "", "", true},
 		{"error with bad engine", "test", "", "", true},
 		{"error without db path", "bolt", "", "", true},
-		{"with bolt", "bolt", os.TempDir() + "/test.db", os.TempDir() + "/restored.db", false},
-		{"with badger", "badger", os.TempDir(), os.TempDir() + "/target/", false},
+		{"with bolt", "bolt", "test.db", "restored.db", false},
 	}
 
 	for _, tt := range tests {
